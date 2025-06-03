@@ -1,0 +1,94 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  --foreground-rgb: 0, 0, 0;
+  --background-start-rgb: 214, 219, 220;
+  --background-end-rgb: 255, 255, 255;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --foreground-rgb: 255, 255, 255;
+    --background-start-rgb: 0, 0, 0;
+    --background-end-rgb: 0, 0, 0;
+  }
+}
+
+@layer base {
+  :root {
+    --background: 0 0% 100%;
+    --foreground: 0 0% 3.9%;
+    --card: 0 0% 100%;
+    --card-foreground: 0 0% 3.9%;
+    --popover: 0 0% 100%;
+    --popover-foreground: 0 0% 3.9%;
+    --primary: 222 47% 35%; /* Adjusted blue for education theme */
+    --primary-foreground: 0 0% 98%;
+    --secondary: 280 40% 96%; /* Subtle purple background */
+    --secondary-foreground: 280 40% 15%;
+    --muted: 0 0% 96.1%;
+    --muted-foreground: 0 0% 45.1%;
+    --accent: 280 20% 96%; /* Subtle purple accent */
+    --accent-foreground: 280 40% 20%;
+    --destructive: 0 84.2% 60.2%;
+    --destructive-foreground: 0 0% 98%;
+    --border: 0 0% 89.8%;
+    --input: 0 0% 89.8%;
+    --ring: 222 47% 35%;
+    --chart-1: 222 47% 35%;
+    --chart-2: 280 40% 50%;
+    --chart-3: 197 37% 24%;
+    --chart-4: 245 58% 51%;
+    --chart-5: 200 64% 43%;
+    --radius: 0.5rem;
+  }
+  .dark {
+    --background: 224 71% 4%;
+    --foreground: 0 0% 98%;
+    --card: 224 71% 4%;
+    --card-foreground: 0 0% 98%;
+    --popover: 224 71% 4%;
+    --popover-foreground: 0 0% 98%;
+    --primary: 214 100% 60%; /* Brighter blue for dark mode */
+    --primary-foreground: 0 0% 100%;
+    --secondary: 220 40% 14.9%; /* Dark purple for secondary */
+    --secondary-foreground: 0 0% 98%;
+    --muted: 224 71% 9%;
+    --muted-foreground: 0 0% 63.9%;
+    --accent: 280 20% 17%; /* Dark purple accent */
+    --accent-foreground: 0 0% 98%;
+    --destructive: 0 62.8% 30.6%;
+    --destructive-foreground: 0 0% 98%;
+    --border: 240 3.7% 15.9%;
+    --input: 240 3.7% 15.9%;
+    --ring: 214 100% 60%;
+    --chart-1: 214 100% 60%;
+    --chart-2: 280 70% 50%;
+    --chart-3: 150 60% 40%;
+    --chart-4: 325 65% 50%;
+    --chart-5: 40 80% 50%;
+  }
+}
+
+@layer base {
+  * {
+    @apply border-border;
+  }
+  body {
+    @apply bg-background text-foreground;
+  }
+}
+
+@keyframes grow {
+  0% {
+    transform: scaleX(0);
+  }
+  50% {
+    transform: scaleX(1);
+  }
+  100% {
+    transform: scaleX(0);
+  }
+}
