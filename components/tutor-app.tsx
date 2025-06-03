@@ -233,6 +233,41 @@ export function TutorApp() {
             <div className="grid grid-cols-1 lg:grid-cols-5 gap-6 flex-1">
               <Card className="col-span-1 lg:col-span-3">
                 <CardContent className="p-4 sm:p-6 h-[500px] flex flex-col">
+                  <TranscriptDisplay messages={messages} />
+                </CardContent>
+              </Card>
+              
+              <Card className="col-span-1 lg:col-span-2">
+                <CardContent className="p-4 sm:p-6 h-[500px] flex flex-col">
                   <AvatarDisplay 
                     isProcessing={isProcessing}
-                    lastMessage={messages[messages.length - 1
+                    lastMessage={messages[messages.length - 1]?.content || ''}
+                    videoEnabled={videoEnabled}
+                  />
+                </CardContent>
+              </Card>
+            </div>
+            
+            <VoiceInput 
+              onTranscript={handleVoiceInput}
+              isProcessing={isProcessing}
+            />
+          </TabsContent>
+          
+          <TabsContent 
+            value="upload"
+            className={cn(
+              "flex-1",
+              tab !== "upload" && "hidden"
+            )}
+          >
+            <DocumentUpload 
+              onUpload={handleDocumentUpload}
+              isUploading={isUploading}
+            />
+          </TabsContent>
+        </Tabs>
+      </div>
+    </div>
+  );
+}
