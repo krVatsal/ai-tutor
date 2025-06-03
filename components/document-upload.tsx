@@ -2,7 +2,7 @@
 
 import { useState, useCallback } from "react";
 import { useDropzone } from "react-dropzone";
-import { FileUp, File, FileText, FileImage, Upload, Loader2 } from "lucide-react";
+import { FileUp, File, Loader2, Upload } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Progress } from "@/components/ui/progress";
 import { Card, CardContent, CardDescription, CardFooter, CardHeader, CardTitle } from "@/components/ui/card";
@@ -33,6 +33,15 @@ export function DocumentUpload({ onUpload, isUploading }: DocumentUploadProps) {
         return;
       }
       
+      if (!selectedFile.name.toLowerCase().endsWith('.pdf')) {
+        toast({
+          title: "Invalid file type",
+          description: "Please select a PDF file",
+          variant: "destructive",
+        });
+        return;
+      }
+      
       setFile(selectedFile);
       setUploadProgress(0);
     }
@@ -42,8 +51,6 @@ export function DocumentUpload({ onUpload, isUploading }: DocumentUploadProps) {
     onDrop,
     accept: {
       'application/pdf': ['.pdf'],
-      'application/vnd.openxmlformats-officedocument.wordprocessingml.document': ['.docx'],
-      'text/plain': ['.txt']
     },
     maxFiles: 1,
     disabled: isUploading
@@ -68,10 +75,15 @@ export function DocumentUpload({ onUpload, isUploading }: DocumentUploadProps) {
           setFile(null);
           setUploadProgress(0);
         }, 1000);
+
+        toast({
+          title: "Upload successful",
+          description: "Your document has been processed and vectorized",
+        });
       } catch (error) {
         toast({
           title: "Upload failed",
-          description: "There was an error uploading your document. Please try again.",
+          description: "There was an error processing your document. Please try again.",
           variant: "destructive",
         });
         setUploadProgress(0);
@@ -79,20 +91,12 @@ export function DocumentUpload({ onUpload, isUploading }: DocumentUploadProps) {
     }
   };
 
-  const getFileIcon = (file: File) => {
-    const type = file.type;
-    if (type.includes('pdf')) return <File className="h-10 w-10 text-red-500" />;
-    if (type.includes('docx') || type.includes('word')) return <FileText className="h-10 w-10 text-blue-500" />;
-    if (type.includes('text')) return <FileText className="h-10 w-10 text-gray-500" />;
-    return <FileImage className="h-10 w-10 text-purple-500" />;
-  };
-
   return (
     <Card className="w-full">
       <CardHeader>
         <CardTitle className="text-2xl">Upload a Document</CardTitle>
         <CardDescription>
-          Upload a PDF, DOCX, or TXT file (max 10MB) to start learning with Mira
+          Upload a PDF file (max 10MB) to start learning with Mira
         </CardDescription>
       </CardHeader>
       <CardContent>
@@ -110,21 +114,21 @@ export function DocumentUpload({ onUpload, isUploading }: DocumentUploadProps) {
           <div className="flex flex-col items-center gap-2">
             <FileUp className="h-10 w-10 text-muted-foreground mb-2" />
             {isDragActive ? (
-              <p className="text-lg font-medium">Drop the file here</p>
+              <p className="text-lg font-medium">Drop the PDF here</p>
             ) : (
               <p className="text-lg font-medium">
-                Drag & drop a file here, or click to select
+                Drag & drop a PDF file here, or click to select
               </p>
             )}
             <p className="text-sm text-muted-foreground">
-              Supports PDF, DOCX, and TXT files up to 10MB
+              Supports PDF files up to 10MB
             </p>
           </div>
         </div>
 
         {file && !isUploading && (
           <div className="mt-6 flex items-center gap-4 p-4 border rounded-lg">
-            {getFileIcon(file)}
+            <File className="h-10 w-10 text-red-500" />
             <div className="flex-1 min-w-0">
               <p className="font-medium truncate">{file.name}</p>
               <p className="text-sm text-muted-foreground">
@@ -137,7 +141,7 @@ export function DocumentUpload({ onUpload, isUploading }: DocumentUploadProps) {
         {isUploading && (
           <div className="mt-6">
             <div className="flex justify-between text-sm mb-1">
-              <span>Uploading {file?.name}</span>
+              <span>Processing {file?.name}</span>
               <span>{uploadProgress}%</span>
             </div>
             <Progress value={uploadProgress} className="h-2" />
