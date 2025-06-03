@@ -1,4 +1,5 @@
 "use client"
+
 import { useState } from "react";
 import { AppHeader } from "@/components/app-header";
 import { DocumentUpload } from "@/components/document-upload";
@@ -11,6 +12,7 @@ import { FileText, FileUp } from "lucide-react";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Message } from "@/types/chat";
 import { cn } from "@/lib/utils";
+import { createConversation } from "@/lib/tavus";
 
 // API base URL configuration - use relative URL to match protocol
 const API_BASE_URL = "http://0.0.0.0:8000/api";
@@ -48,13 +50,21 @@ export function TutorApp() {
       
       setActiveDocument(file.name);
       
-      setMessages((prev) => [
-        ...prev,
-        {
-          role: "assistant",
-          content: `I've processed the document "${file.name}". What would you like to know about it?`,
-        },
-      ]);
+      // After successful document upload, create Tavus conversation
+      try {
+        const conversationResponse = await createConversation();
+        if (conversationResponse.conversation_url) {
+          setMessages((prev) => [
+            ...prev,
+            {
+              role: "assistant",
+              content: `I've processed the document "${file.name}". I'm ready to discuss it with you through our video chat. What would you like to know about it?`,
+            },
+          ]);
+        }
+      } catch (error) {
+        console.error("Error creating Tavus conversation:", error);
+      }
       
       setTab("chat");
     } catch (error) {
