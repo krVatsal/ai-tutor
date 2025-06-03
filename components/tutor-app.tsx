@@ -1,5 +1,3 @@
-"use client";
-
 import { useState } from "react";
 import { AppHeader } from "@/components/app-header";
 import { DocumentUpload } from "@/components/document-upload";

@@ -5,10 +5,9 @@ const TAVUS_API_KEY = process.env.NEXT_PUBLIC_TAVUS_API_KEY;
 const TAVUS_PERSONA_ID = 'p296a08ac834';
 const TAVUS_REPLICA_ID = 'r9d30b0e55ac';
 
-export async function generateVideoResponse(text: string) {
+export async function createConversation() {
   try {
-    // First create a conversation
-    const conversationResponse = await axios.post(
+    const response = await axios.post(
       `${TAVUS_API_URL}/conversations`,
       {
         replica_id: TAVUS_REPLICA_ID,
@@ -23,14 +22,29 @@ export async function generateVideoResponse(text: string) {
       }
     );
 
-    const conversationId = conversationResponse.data.conversation_id;
+    return response.data;
+  } catch (error) {
+    console.error('Error creating conversation:', error);
+    throw error;
+  }
+}
+
+export async function generateVideoResponse(text: string) {
+  try {
+    // First create a conversation
+    const conversationResponse = await createConversation();
+    
+    if (conversationResponse.conversation_url) {
+      // Open the conversation URL in a new tab
+      window.open(conversationResponse.conversation_url, '_blank');
+    }
 
     // Then generate the video response
     const response = await axios.post(
       `${TAVUS_API_URL}/speech`,
       {
         text,
-        conversation_id: conversationId
+        conversation_id: conversationResponse.conversation_id
       },
       {
         headers: {
