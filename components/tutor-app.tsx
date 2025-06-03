@@ -106,8 +106,6 @@ export function TutorApp() {
         { role: "assistant", content: data.response },
       ]);
       
-      generateAvatarResponse(data.response);
-      
     } catch (error) {
       console.error("Error getting AI response:", error);
       
@@ -120,29 +118,6 @@ export function TutorApp() {
       ]);
     } finally {
       setIsProcessing(false);
-    }
-  };
-
-  const generateAvatarResponse = async (text: string) => {
-    if (!videoEnabled) return;
-
-    try {
-      const response = await fetch(`${API_BASE_URL}/generate-avatar-response`, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/x-www-form-urlencoded",
-        },
-        body: `text=${encodeURIComponent(text)}`,
-      });
-
-      if (!response.ok) {
-        throw new Error("Failed to generate avatar response");
-      }
-
-      const data = await response.json();
-      console.log("Avatar response generated:", data);
-    } catch (error) {
-      console.error("Error generating avatar response:", error);
     }
   };
 
@@ -171,8 +146,6 @@ export function TutorApp() {
         { role: "user", content: "Can you summarize this document?" },
         { role: "assistant", content: data.summary },
       ]);
-      
-      generateAvatarResponse(data.summary);
       
     } catch (error) {
       console.error("Error summarizing document:", error);
@@ -251,6 +224,8 @@ export function TutorApp() {
             <VoiceInput 
               onTranscript={handleVoiceInput}
               isProcessing={isProcessing}
+              disabled={!activeDocument}
+              videoEnabled={videoEnabled}
             />
           </TabsContent>
           
