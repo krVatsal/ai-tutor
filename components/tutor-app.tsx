@@ -3,67 +3,78 @@
 import { useState } from "react";
 import { AppHeader } from "@/components/app-header";
 import { DocumentUpload } from "@/components/document-upload";
-import { VoiceInput } from "@/components/voice-input";
+import { ChatInterface } from "@/components/chat-interface";
 import { AvatarDisplay } from "@/components/avatar-display";
-import { TranscriptDisplay } from "@/components/transcript-display";
 import { Card, CardContent } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { FileText, FileUp } from "lucide-react";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Message } from "@/types/chat";
 import { cn } from "@/lib/utils";
-import { createConversation } from "@/lib/tavus";
 
-// API base URL configuration - use relative URL to match protocol
-const API_BASE_URL = "http://localhost:8000/api";
+// API base URL configuration
+const API_BASE_URL = process.env.NODE_ENV === 'production' 
+  ? 'https://your-api-domain.com' 
+  : 'http://localhost:8000';
 
 export function TutorApp() {
   const [activeDocument, setActiveDocument] = useState<string | null>(null);
   const [messages, setMessages] = useState<Message[]>([
     {
       role: "assistant",
-      content: "Hello! I'm Mira, your AI tutor. How can I help you today?",
+      content: "Hello! I'm Mira, your AI tutor. Upload a document to get started, and I'll help you understand it better.",
     },
   ]);
   const [isProcessing, setIsProcessing] = useState(false);
   const [isUploading, setIsUploading] = useState(false);
   const [tab, setTab] = useState<string>("chat");
   const [videoEnabled, setVideoEnabled] = useState(true);
+  const [currentPersonaId, setCurrentPersonaId] = useState<string | null>(null);
+  const [documentText, setDocumentText] = useState<string>("");
 
   const handleDocumentUpload = async (file: File) => {
     setIsUploading(true);
     
     try {
+      // Upload and process document with FastAPI
       const formData = new FormData();
       formData.append("file", file);
 
-      const response = await fetch(`${API_BASE_URL}/upload`, {
+      const uploadResponse = await fetch(`${API_BASE_URL}/api/upload`, {
         method: "POST",
         body: formData,
       });
 
-      if (!response.ok) {
+      if (!uploadResponse.ok) {
         throw new Error("Failed to upload document");
       }
 
-      const data = await response.json();
-      
+      const uploadData = await uploadResponse.json();
       setActiveDocument(file.name);
       
-      // After successful document upload, create Tavus conversation
-      try {
-        const conversationResponse = await createConversation();
-        if (conversationResponse.conversation_url) {
-          setMessages((prev) => [
-            ...prev,
-            {
-              role: "assistant",
-              content: `I've processed the document "${file.name}". I'm ready to discuss it with you through our video chat. What would you like to know about it?`,
-            },
-          ]);
-        }
-      } catch (error) {
-        console.error("Error creating Tavus conversation:", error);
+      // Check if persona was created successfully
+      if (uploadData.persona_id) {
+        setCurrentPersonaId(uploadData.persona_id);
+        
+        // Store for later use
+        localStorage.setItem('currentPersonaId', uploadData.persona_id);
+        localStorage.setItem('currentDocumentName', file.name);
+        
+        setMessages((prev) => [
+          ...prev,
+          {
+            role: "assistant",
+            content: `Perfect! I've processed "${file.name}" and created a personalized learning experience for you. I'm now ready to discuss the document content through both text and video chat. What would you like to know about it?`,
+          },
+        ]);
+      } else {
+        setMessages((prev) => [
+          ...prev,
+          {
+            role: "assistant",
+            content: `I've processed "${file.name}" successfully! While I couldn't set up the advanced video features, I'm ready to help you understand the document through our text chat. What would you like to know?`,
+          },
+        ]);
       }
       
       setTab("chat");
@@ -82,24 +93,24 @@ export function TutorApp() {
     }
   };
 
-  const handleVoiceInput = async (transcript: string) => {
-    if (!transcript.trim()) return;
+  const handleSendMessage = async (messageContent: string) => {
+    if (!messageContent.trim()) return;
     
     setMessages((prev) => [
       ...prev,
-      { role: "user", content: transcript },
+      { role: "user", content: messageContent },
     ]);
     
     setIsProcessing(true);
     
     try {
-      const response = await fetch(`${API_BASE_URL}/chat`, {
+      const response = await fetch(`${API_BASE_URL}/api/chat`, {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
         },
         body: JSON.stringify({ 
-          query: transcript,
+          query: messageContent,
           document_name: activeDocument
         }),
       });
@@ -135,50 +146,14 @@ export function TutorApp() {
     }
   };
 
+  const handleVoiceMessage = async (transcript: string) => {
+    await handleSendMessage(transcript);
+  };
+
   const handleSummarizeDocument = async () => {
     if (!activeDocument) return;
     
-    setIsProcessing(true);
-    
-    try {
-      const response = await fetch(`${API_BASE_URL}/summarize`, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({ document_name: activeDocument }),
-      });
-
-      if (!response.ok) {
-        throw new Error("Failed to summarize document");
-      }      const data = await response.json();
-      
-      // Handle case where summary might be an object with result property
-      const summaryText = typeof data.summary === 'object' && data.summary?.result 
-        ? data.summary.result 
-        : typeof data.summary === 'string' 
-          ? data.summary 
-          : JSON.stringify(data.summary);
-      
-      setMessages((prev) => [
-        ...prev,
-        { role: "user", content: "Can you summarize this document?" },
-        { role: "assistant", content: summaryText },
-      ]);
-      
-    } catch (error) {
-      console.error("Error summarizing document:", error);
-      
-      setMessages((prev) => [
-        ...prev,
-        {
-          role: "assistant",
-          content: "I'm sorry, I couldn't summarize the document. Please try again.",
-        },
-      ]);
-    } finally {
-      setIsProcessing(false);
-    }
+    await handleSendMessage("Can you summarize this document for me?");
   };
 
   return (
@@ -218,34 +193,50 @@ export function TutorApp() {
           <TabsContent 
             value="chat" 
             className={cn(
-              "flex-1 flex flex-col space-y-6 md:space-y-8",
+              "flex-1 flex flex-col space-y-6",
               tab !== "chat" && "hidden"
             )}
           >
-            <div className="grid grid-cols-1 lg:grid-cols-5 gap-6 flex-1">
-              <Card className="col-span-1 lg:col-span-3">
-                <CardContent className="p-4 sm:p-6 h-[500px] flex flex-col">
-                  <TranscriptDisplay messages={messages} />
+            <div className="grid grid-cols-1 lg:grid-cols-3 gap-6 flex-1">
+              {/* Chat Interface */}
+              <Card className="col-span-1 lg:col-span-2">
+                <CardContent className="p-0 h-[600px]">
+                  <ChatInterface
+                    messages={messages}
+                    onSendMessage={handleSendMessage}
+                    onVoiceMessage={handleVoiceMessage}
+                    isProcessing={isProcessing}
+                    disabled={!activeDocument}
+                  />
                 </CardContent>
               </Card>
               
-              <Card className="col-span-1 lg:col-span-2">
-                <CardContent className="p-4 sm:p-6 h-[500px] flex flex-col">
+              {/* Avatar Display */}
+              <Card className="col-span-1">
+                <CardContent className="p-4 h-[600px] flex flex-col">
                   <AvatarDisplay 
                     isProcessing={isProcessing}
                     lastMessage={messages[messages.length - 1]?.content || ''}
                     videoEnabled={videoEnabled}
+                    personaId={currentPersonaId}
+                    documentName={activeDocument}
                   />
                 </CardContent>
               </Card>
             </div>
             
-            <VoiceInput 
-              onTranscript={handleVoiceInput}
-              isProcessing={isProcessing}
-              disabled={!activeDocument}
-              videoEnabled={videoEnabled}
-            />
+            {!activeDocument && (
+              <Card className="p-6 text-center bg-muted/50">
+                <FileUp className="h-12 w-12 mx-auto mb-4 text-muted-foreground" />
+                <h3 className="text-lg font-semibold mb-2">No Document Uploaded</h3>
+                <p className="text-muted-foreground mb-4">
+                  Upload a PDF document to start chatting with Mira about its contents.
+                </p>
+                <Button onClick={() => setTab("upload")}>
+                  Upload Document
+                </Button>
+              </Card>
+            )}
           </TabsContent>
           
           <TabsContent 
