@@ -15,7 +15,7 @@ import { cn } from "@/lib/utils";
 import { createConversation } from "@/lib/tavus";
 
 // API base URL configuration - use relative URL to match protocol
-const API_BASE_URL = "http://0.0.0.0:8000/api";
+const API_BASE_URL = "http://localhost:8000/api";
 
 export function TutorApp() {
   const [activeDocument, setActiveDocument] = useState<string | null>(null);
@@ -106,13 +106,18 @@ export function TutorApp() {
 
       if (!response.ok) {
         throw new Error("Failed to get AI response");
-      }
-
-      const data = await response.json();
+      }      const data = await response.json();
+      
+      // Handle case where response might be an object with result property
+      const responseText = typeof data.response === 'object' && data.response?.result 
+        ? data.response.result 
+        : typeof data.response === 'string' 
+          ? data.response 
+          : JSON.stringify(data.response);
       
       setMessages((prev) => [
         ...prev,
-        { role: "assistant", content: data.response },
+        { role: "assistant", content: responseText },
       ]);
       
     } catch (error) {
@@ -146,14 +151,19 @@ export function TutorApp() {
 
       if (!response.ok) {
         throw new Error("Failed to summarize document");
-      }
-
-      const data = await response.json();
+      }      const data = await response.json();
+      
+      // Handle case where summary might be an object with result property
+      const summaryText = typeof data.summary === 'object' && data.summary?.result 
+        ? data.summary.result 
+        : typeof data.summary === 'string' 
+          ? data.summary 
+          : JSON.stringify(data.summary);
       
       setMessages((prev) => [
         ...prev,
         { role: "user", content: "Can you summarize this document?" },
-        { role: "assistant", content: data.summary },
+        { role: "assistant", content: summaryText },
       ]);
       
     } catch (error) {
