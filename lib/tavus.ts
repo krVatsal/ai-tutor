@@ -1,20 +1,20 @@
-import axios from 'axios';
+// Frontend API calls to FastAPI backend
 
-const TAVUS_API_URL = process.env.NEXT_PUBLIC_TAVUS_API_URL || 'https://tavusapi.com/v2';
-const TAVUS_API_KEY = process.env.NEXT_PUBLIC_TAVUS_API_KEY;
-const TAVUS_REPLICA_ID = process.env.NEXT_PUBLIC_TAVUS_REPLICA_ID || 'r9d30b0e55ac';
+const API_BASE_URL = process.env.NODE_ENV === 'production' 
+  ? 'https://your-api-domain.com' 
+  : 'http://localhost:8000';
 
 // Create persona with document context
 export async function createPersonaWithDocument(documentText: string, documentName: string) {
   try {
-    const response = await fetch('/api/createPersona', {
+    const response = await fetch(`${API_BASE_URL}/create-persona`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
       },
       body: JSON.stringify({
-        documentText,
-        documentName
+        document_text: documentText,
+        document_name: documentName
       })
     });
 
@@ -32,7 +32,7 @@ export async function createPersonaWithDocument(documentText: string, documentNa
 // Create conversation with persona
 export async function createConversationWithPersona(personaId: string, documentName: string) {
   try {
-    const response = await fetch('/api/createConversation', {
+    const response = await fetch(`${API_BASE_URL}/create-conversation`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
@@ -54,51 +54,17 @@ export async function createConversationWithPersona(personaId: string, documentN
   }
 }
 
-// Legacy function for backward compatibility
-export async function createConversation() {
-  try {
-    // Try to get stored persona ID
-    const storedPersonaId = localStorage.getItem('currentPersonaId');
-    const storedDocumentName = localStorage.getItem('currentDocumentName');
-    
-    if (storedPersonaId) {
-      return await createConversationWithPersona(storedPersonaId, storedDocumentName || 'Document');
-    }
-    
-    // Fallback to direct conversation creation
-    const response = await axios.post(
-      `${TAVUS_API_URL}/conversations`,
-      {
-        replica_id: TAVUS_REPLICA_ID,
-        conversation_name: "AI Tutor Chat",
-        conversational_context: "Educational discussion about uploaded document"
-      },
-      {
-        headers: {
-          'Content-Type': 'application/json',
-          'x-api-key': TAVUS_API_KEY
-        }
-      }
-    );
-
-    return response.data;
-  } catch (error) {
-    console.error('Error creating conversation:', error);
-    throw error;
-  }
-}
-
 // Generate video response
-export async function generateVideoResponse(text: string, conversationId?: string) {
+export async function generateVideoResponse(text: string, conversationId: string) {
   try {
-    const response = await fetch('/api/generateSpeech', {
+    const response = await fetch(`${API_BASE_URL}/generate-speech`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
       },
       body: JSON.stringify({
         conversation_id: conversationId,
-        text
+        text: text
       })
     });
 
@@ -116,7 +82,7 @@ export async function generateVideoResponse(text: string, conversationId?: strin
 // Get video status
 export async function getVideoStatus(speechId: string) {
   try {
-    const response = await fetch(`/api/getSpeechStatus?speech_id=${speechId}`);
+    const response = await fetch(`${API_BASE_URL}/speech-status/${speechId}`);
     
     if (!response.ok) {
       throw new Error(`Failed to get speech status: ${response.statusText}`);
@@ -129,20 +95,20 @@ export async function getVideoStatus(speechId: string) {
   }
 }
 
-// Get existing conversation
-export async function getExistingConversation(conversationId: string) {
+// Legacy function for backward compatibility
+export async function createConversation() {
   try {
-    const response = await axios.get(
-      `${TAVUS_API_URL}/conversations/${conversationId}`,
-      {
-        headers: {
-          'x-api-key': TAVUS_API_KEY
-        }
-      }
-    );
-    return response.data;
+    // Try to get stored persona ID
+    const storedPersonaId = localStorage.getItem('currentPersonaId');
+    const storedDocumentName = localStorage.getItem('currentDocumentName');
+    
+    if (storedPersonaId && storedDocumentName) {
+      return await createConversationWithPersona(storedPersonaId, storedDocumentName);
+    }
+    
+    throw new Error('No persona found. Please upload a document first.');
   } catch (error) {
-    console.error('Error getting conversation:', error);
+    console.error('Error creating conversation:', error);
     throw error;
   }
 }

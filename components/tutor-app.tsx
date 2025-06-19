@@ -11,10 +11,11 @@ import { FileText, FileUp } from "lucide-react";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Message } from "@/types/chat";
 import { cn } from "@/lib/utils";
-import { createPersonaWithDocument, createConversationWithPersona } from "@/lib/tavus";
 
 // API base URL configuration
-const API_BASE_URL = "http://0.0.0.0:8000";
+const API_BASE_URL = process.env.NODE_ENV === 'production' 
+  ? 'https://your-api-domain.com' 
+  : 'http://localhost:8000';
 
 export function TutorApp() {
   const [activeDocument, setActiveDocument] = useState<string | null>(null);
@@ -35,7 +36,7 @@ export function TutorApp() {
     setIsUploading(true);
     
     try {
-      // Step 1: Upload and process document
+      // Upload and process document with FastAPI
       const formData = new FormData();
       formData.append("file", file);
 
@@ -51,21 +52,13 @@ export function TutorApp() {
       const uploadData = await uploadResponse.json();
       setActiveDocument(file.name);
       
-      // Step 2: Extract document text for persona creation
-      // In a real implementation, you'd extract text from the uploaded PDF
-      // For now, we'll use a placeholder
-      const extractedText = `Document: ${file.name}\n\nThis document has been processed and vectorized for AI analysis.`;
-      setDocumentText(extractedText);
-      
-      // Step 3: Create Tavus persona with document context
-      try {
-        const personaResponse = await createPersonaWithDocument(extractedText, file.name);
-        setCurrentPersonaId(personaResponse.persona_id);
+      // Check if persona was created successfully
+      if (uploadData.persona_id) {
+        setCurrentPersonaId(uploadData.persona_id);
         
         // Store for later use
-        localStorage.setItem('currentPersonaId', personaResponse.persona_id);
+        localStorage.setItem('currentPersonaId', uploadData.persona_id);
         localStorage.setItem('currentDocumentName', file.name);
-        localStorage.setItem('currentDocumentText', extractedText);
         
         setMessages((prev) => [
           ...prev,
@@ -74,9 +67,7 @@ export function TutorApp() {
             content: `Perfect! I've processed "${file.name}" and created a personalized learning experience for you. I'm now ready to discuss the document content through both text and video chat. What would you like to know about it?`,
           },
         ]);
-        
-      } catch (personaError) {
-        console.error("Error creating persona:", personaError);
+      } else {
         setMessages((prev) => [
           ...prev,
           {
@@ -157,42 +148,7 @@ export function TutorApp() {
   const handleSummarizeDocument = async () => {
     if (!activeDocument) return;
     
-    setIsProcessing(true);
-    
-    try {
-      const response = await fetch(`${API_BASE_URL}/summarize`, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({ document_name: activeDocument }),
-      });
-
-      if (!response.ok) {
-        throw new Error("Failed to summarize document");
-      }
-
-      const data = await response.json();
-      
-      setMessages((prev) => [
-        ...prev,
-        { role: "user", content: "Can you summarize this document?" },
-        { role: "assistant", content: data.summary },
-      ]);
-      
-    } catch (error) {
-      console.error("Error summarizing document:", error);
-      
-      setMessages((prev) => [
-        ...prev,
-        {
-          role: "assistant",
-          content: "I'm sorry, I couldn't summarize the document. Please try again.",
-        },
-      ]);
-    } finally {
-      setIsProcessing(false);
-    }
+    await handleSendMessage("Can you summarize this document for me?");
   };
 
   return (
