@@ -3,9 +3,8 @@
 import { useState } from "react";
 import { AppHeader } from "@/components/app-header";
 import { DocumentUpload } from "@/components/document-upload";
-import { VoiceInput } from "@/components/voice-input";
+import { ChatInterface } from "@/components/chat-interface";
 import { AvatarDisplay } from "@/components/avatar-display";
-import { TranscriptDisplay } from "@/components/transcript-display";
 import { Card, CardContent } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { FileText, FileUp } from "lucide-react";
@@ -15,14 +14,14 @@ import { cn } from "@/lib/utils";
 import { createConversation } from "@/lib/tavus";
 
 // API base URL configuration - use relative URL to match protocol
-const API_BASE_URL = "http://0.0.0.0:8000/api";
+const API_BASE_URL = "http://0.0.0.0:8000";
 
 export function TutorApp() {
   const [activeDocument, setActiveDocument] = useState<string | null>(null);
   const [messages, setMessages] = useState<Message[]>([
     {
       role: "assistant",
-      content: "Hello! I'm Mira, your AI tutor. How can I help you today?",
+      content: "Hello! I'm Mira, your AI tutor. Upload a document to get started, and I'll help you understand it better.",
     },
   ]);
   const [isProcessing, setIsProcessing] = useState(false);
@@ -58,12 +57,19 @@ export function TutorApp() {
             ...prev,
             {
               role: "assistant",
-              content: `I've processed the document "${file.name}". I'm ready to discuss it with you through our video chat. What would you like to know about it?`,
+              content: `Perfect! I've processed "${file.name}" and it's now ready for our discussion. What would you like to know about the document?`,
             },
           ]);
         }
       } catch (error) {
         console.error("Error creating Tavus conversation:", error);
+        setMessages((prev) => [
+          ...prev,
+          {
+            role: "assistant",
+            content: `Great! I've processed "${file.name}". What would you like to know about it?`,
+          },
+        ]);
       }
       
       setTab("chat");
@@ -82,12 +88,12 @@ export function TutorApp() {
     }
   };
 
-  const handleVoiceInput = async (transcript: string) => {
-    if (!transcript.trim()) return;
+  const handleSendMessage = async (messageContent: string) => {
+    if (!messageContent.trim()) return;
     
     setMessages((prev) => [
       ...prev,
-      { role: "user", content: transcript },
+      { role: "user", content: messageContent },
     ]);
     
     setIsProcessing(true);
@@ -99,7 +105,7 @@ export function TutorApp() {
           "Content-Type": "application/json",
         },
         body: JSON.stringify({ 
-          query: transcript,
+          query: messageContent,
           document_name: activeDocument
         }),
       });
@@ -128,6 +134,10 @@ export function TutorApp() {
     } finally {
       setIsProcessing(false);
     }
+  };
+
+  const handleVoiceMessage = async (transcript: string) => {
+    await handleSendMessage(transcript);
   };
 
   const handleSummarizeDocument = async () => {
@@ -208,19 +218,27 @@ export function TutorApp() {
           <TabsContent 
             value="chat" 
             className={cn(
-              "flex-1 flex flex-col space-y-6 md:space-y-8",
+              "flex-1 flex flex-col space-y-6",
               tab !== "chat" && "hidden"
             )}
           >
-            <div className="grid grid-cols-1 lg:grid-cols-5 gap-6 flex-1">
-              <Card className="col-span-1 lg:col-span-3">
-                <CardContent className="p-4 sm:p-6 h-[500px] flex flex-col">
-                  <TranscriptDisplay messages={messages} />
+            <div className="grid grid-cols-1 lg:grid-cols-3 gap-6 flex-1">
+              {/* Chat Interface */}
+              <Card className="col-span-1 lg:col-span-2">
+                <CardContent className="p-0 h-[600px]">
+                  <ChatInterface
+                    messages={messages}
+                    onSendMessage={handleSendMessage}
+                    onVoiceMessage={handleVoiceMessage}
+                    isProcessing={isProcessing}
+                    disabled={!activeDocument}
+                  />
                 </CardContent>
               </Card>
               
-              <Card className="col-span-1 lg:col-span-2">
-                <CardContent className="p-4 sm:p-6 h-[500px] flex flex-col">
+              {/* Avatar Display */}
+              <Card className="col-span-1">
+                <CardContent className="p-4 h-[600px] flex flex-col">
                   <AvatarDisplay 
                     isProcessing={isProcessing}
                     lastMessage={messages[messages.length - 1]?.content || ''}
@@ -230,12 +248,18 @@ export function TutorApp() {
               </Card>
             </div>
             
-            <VoiceInput 
-              onTranscript={handleVoiceInput}
-              isProcessing={isProcessing}
-              disabled={!activeDocument}
-              videoEnabled={videoEnabled}
-            />
+            {!activeDocument && (
+              <Card className="p-6 text-center bg-muted/50">
+                <FileUp className="h-12 w-12 mx-auto mb-4 text-muted-foreground" />
+                <h3 className="text-lg font-semibold mb-2">No Document Uploaded</h3>
+                <p className="text-muted-foreground mb-4">
+                  Upload a PDF document to start chatting with Mira about its contents.
+                </p>
+                <Button onClick={() => setTab("upload")}>
+                  Upload Document
+                </Button>
+              </Card>
+            )}
           </TabsContent>
           
           <TabsContent 
