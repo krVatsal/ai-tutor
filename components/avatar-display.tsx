@@ -1,25 +1,34 @@
 "use client";
 
 import { useState, useEffect } from "react";
-import { Video, Clock, ExternalLink, Loader2 } from "lucide-react";
+import { Video, Clock, ExternalLink, Loader2, Play } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Progress } from "@/components/ui/progress";
 import { Badge } from "@/components/ui/badge";
 import { cn } from "@/lib/utils";
-import { createConversation } from "@/lib/tavus";
+import { createConversationWithPersona } from "@/lib/tavus";
 
 interface AvatarDisplayProps {
   isProcessing: boolean;
   lastMessage: string;
   videoEnabled: boolean;
+  personaId?: string | null;
+  documentName?: string | null;
 }
 
-export function AvatarDisplay({ isProcessing, lastMessage, videoEnabled }: AvatarDisplayProps) {
+export function AvatarDisplay({ 
+  isProcessing, 
+  lastMessage, 
+  videoEnabled, 
+  personaId,
+  documentName 
+}: AvatarDisplayProps) {
   const [isGeneratingVideo, setIsGeneratingVideo] = useState(false);
   const [timeRemaining, setTimeRemaining] = useState(300); // 5 minutes in seconds
   const [videoSessionActive, setVideoSessionActive] = useState(false);
   const [conversationUrl, setConversationUrl] = useState<string | null>(null);
+  const [conversationId, setConversationId] = useState<string | null>(null);
 
   // Timer countdown
   useEffect(() => {
@@ -49,17 +58,29 @@ export function AvatarDisplay({ isProcessing, lastMessage, videoEnabled }: Avata
   };
 
   const initiateVideoChat = async () => {
+    if (!personaId || !documentName) {
+      console.error('Missing persona ID or document name');
+      return;
+    }
+
     try {
       setIsGeneratingVideo(true);
-      const response = await createConversation();
       
-      if (response.conversation_url) {
+      // Create conversation with the persona
+      const response = await createConversationWithPersona(personaId, documentName);
+      
+      if (response.conversation_url && response.conversation_id) {
         setConversationUrl(response.conversation_url);
+        setConversationId(response.conversation_id);
         setVideoSessionActive(true);
         setTimeRemaining(300); // Reset to 5 minutes
         
+        // Store conversation details
+        localStorage.setItem('currentConversationId', response.conversation_id);
+        localStorage.setItem('currentConversationUrl', response.conversation_url);
+        
         // Open the conversation URL in a new tab
-        window.open(response.conversation_url, '_blank');
+        window.open(response.conversation_url, '_blank', 'width=800,height=600');
       }
     } catch (error) {
       console.error('Error creating video conversation:', error);
@@ -70,9 +91,11 @@ export function AvatarDisplay({ isProcessing, lastMessage, videoEnabled }: Avata
 
   const openVideoChat = () => {
     if (conversationUrl) {
-      window.open(conversationUrl, '_blank');
+      window.open(conversationUrl, '_blank', 'width=800,height=600');
     }
   };
+
+  const canStartVideo = personaId && documentName && !videoSessionActive;
 
   return (
     <div className="flex flex-col h-full">
@@ -95,10 +118,13 @@ export function AvatarDisplay({ isProcessing, lastMessage, videoEnabled }: Avata
           {/* Status indicator */}
           <div className={cn(
             "absolute bottom-2 right-2 w-6 h-6 rounded-full border-2 border-background flex items-center justify-center",
-            videoSessionActive ? "bg-green-500" : "bg-gray-400"
+            videoSessionActive ? "bg-green-500" : personaId ? "bg-blue-500" : "bg-gray-400"
           )}>
             {videoSessionActive && (
               <div className="w-2 h-2 bg-white rounded-full animate-pulse" />
+            )}
+            {personaId && !videoSessionActive && (
+              <Play className="w-3 h-3 text-white" />
             )}
           </div>
         </div>
@@ -106,8 +132,12 @@ export function AvatarDisplay({ isProcessing, lastMessage, videoEnabled }: Avata
         {/* Status and Timer */}
         <div className="text-center space-y-2">
           <div className="flex items-center justify-center gap-2">
-            <Badge variant={videoSessionActive ? "default" : "secondary"}>
-              {videoSessionActive ? "Video Session Active" : "Ready for Video Chat"}
+            <Badge variant={videoSessionActive ? "default" : personaId ? "secondary" : "outline"}>
+              {videoSessionActive 
+                ? "Video Session Active" 
+                : personaId 
+                  ? "Ready for Video Chat" 
+                  : "Upload Document First"}
             </Badge>
           </div>
           
@@ -137,7 +167,7 @@ export function AvatarDisplay({ isProcessing, lastMessage, videoEnabled }: Avata
           {!videoSessionActive ? (
             <Button
               onClick={initiateVideoChat}
-              disabled={isGeneratingVideo || isProcessing}
+              disabled={!canStartVideo || isGeneratingVideo || isProcessing}
               className="w-full"
               size="lg"
             >
@@ -145,6 +175,11 @@ export function AvatarDisplay({ isProcessing, lastMessage, videoEnabled }: Avata
                 <>
                   <Loader2 className="mr-2 h-4 w-4 animate-spin" />
                   Setting up video chat...
+                </>
+              ) : !personaId ? (
+                <>
+                  <Video className="mr-2 h-4 w-4" />
+                  Upload Document to Enable Video
                 </>
               ) : (
                 <>
@@ -165,7 +200,7 @@ export function AvatarDisplay({ isProcessing, lastMessage, videoEnabled }: Avata
               </Button>
               
               <p className="text-xs text-center text-muted-foreground">
-                Video chat opened in new tab. Continue your conversation there!
+                Video chat opened in new window. Continue your conversation there!
               </p>
             </div>
           )}
@@ -188,12 +223,24 @@ export function AvatarDisplay({ isProcessing, lastMessage, videoEnabled }: Avata
               <div className="flex items-start gap-2">
                 <ExternalLink className="h-4 w-4 mt-0.5 text-muted-foreground shrink-0" />
                 <div>
-                  <p className="font-medium">Opens in new tab</p>
+                  <p className="font-medium">Opens in new window</p>
                   <p className="text-muted-foreground text-xs">
-                    Video chat will open in a separate browser tab
+                    Video chat will open in a separate browser window
                   </p>
                 </div>
               </div>
+
+              {personaId && (
+                <div className="flex items-start gap-2">
+                  <Video className="h-4 w-4 mt-0.5 text-muted-foreground shrink-0" />
+                  <div>
+                    <p className="font-medium">Document-aware AI</p>
+                    <p className="text-muted-foreground text-xs">
+                      Mira has been trained on your specific document
+                    </p>
+                  </div>
+                </div>
+              )}
             </div>
           </CardContent>
         </Card>

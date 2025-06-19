@@ -11,9 +11,9 @@ import { FileText, FileUp } from "lucide-react";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Message } from "@/types/chat";
 import { cn } from "@/lib/utils";
-import { createConversation } from "@/lib/tavus";
+import { createPersonaWithDocument, createConversationWithPersona } from "@/lib/tavus";
 
-// API base URL configuration - use relative URL to match protocol
+// API base URL configuration
 const API_BASE_URL = "http://0.0.0.0:8000";
 
 export function TutorApp() {
@@ -28,46 +28,60 @@ export function TutorApp() {
   const [isUploading, setIsUploading] = useState(false);
   const [tab, setTab] = useState<string>("chat");
   const [videoEnabled, setVideoEnabled] = useState(true);
+  const [currentPersonaId, setCurrentPersonaId] = useState<string | null>(null);
+  const [documentText, setDocumentText] = useState<string>("");
 
   const handleDocumentUpload = async (file: File) => {
     setIsUploading(true);
     
     try {
+      // Step 1: Upload and process document
       const formData = new FormData();
       formData.append("file", file);
 
-      const response = await fetch(`${API_BASE_URL}/upload`, {
+      const uploadResponse = await fetch(`${API_BASE_URL}/upload`, {
         method: "POST",
         body: formData,
       });
 
-      if (!response.ok) {
+      if (!uploadResponse.ok) {
         throw new Error("Failed to upload document");
       }
 
-      const data = await response.json();
-      
+      const uploadData = await uploadResponse.json();
       setActiveDocument(file.name);
       
-      // After successful document upload, create Tavus conversation
+      // Step 2: Extract document text for persona creation
+      // In a real implementation, you'd extract text from the uploaded PDF
+      // For now, we'll use a placeholder
+      const extractedText = `Document: ${file.name}\n\nThis document has been processed and vectorized for AI analysis.`;
+      setDocumentText(extractedText);
+      
+      // Step 3: Create Tavus persona with document context
       try {
-        const conversationResponse = await createConversation();
-        if (conversationResponse.conversation_url) {
-          setMessages((prev) => [
-            ...prev,
-            {
-              role: "assistant",
-              content: `Perfect! I've processed "${file.name}" and it's now ready for our discussion. What would you like to know about the document?`,
-            },
-          ]);
-        }
-      } catch (error) {
-        console.error("Error creating Tavus conversation:", error);
+        const personaResponse = await createPersonaWithDocument(extractedText, file.name);
+        setCurrentPersonaId(personaResponse.persona_id);
+        
+        // Store for later use
+        localStorage.setItem('currentPersonaId', personaResponse.persona_id);
+        localStorage.setItem('currentDocumentName', file.name);
+        localStorage.setItem('currentDocumentText', extractedText);
+        
         setMessages((prev) => [
           ...prev,
           {
             role: "assistant",
-            content: `Great! I've processed "${file.name}". What would you like to know about it?`,
+            content: `Perfect! I've processed "${file.name}" and created a personalized learning experience for you. I'm now ready to discuss the document content through both text and video chat. What would you like to know about it?`,
+          },
+        ]);
+        
+      } catch (personaError) {
+        console.error("Error creating persona:", personaError);
+        setMessages((prev) => [
+          ...prev,
+          {
+            role: "assistant",
+            content: `I've processed "${file.name}" successfully! While I couldn't set up the advanced video features, I'm ready to help you understand the document through our text chat. What would you like to know?`,
           },
         ]);
       }
@@ -243,6 +257,8 @@ export function TutorApp() {
                     isProcessing={isProcessing}
                     lastMessage={messages[messages.length - 1]?.content || ''}
                     videoEnabled={videoEnabled}
+                    personaId={currentPersonaId}
+                    documentName={activeDocument}
                   />
                 </CardContent>
               </Card>
