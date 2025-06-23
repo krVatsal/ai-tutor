@@ -12,6 +12,8 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Message } from "@/types/chat";
 import { cn } from "@/lib/utils";
 import { createConversationWithPersona } from "@/lib/tavus";
+import { useUser } from '@clerk/nextjs';
+import { redirect } from 'next/navigation';
 
 // API base URL configuration
 const API_BASE_URL = process.env.NODE_ENV === 'production' 
@@ -19,6 +21,7 @@ const API_BASE_URL = process.env.NODE_ENV === 'production'
   : 'http://localhost:8000';
 
 export function TutorApp() {
+  const { isLoaded, isSignedIn, user } = useUser();
   const [activeDocument, setActiveDocument] = useState<string | null>(null);
   const [messages, setMessages] = useState<Message[]>([
     {
@@ -34,29 +37,50 @@ export function TutorApp() {
   const [documentText, setDocumentText] = useState<string>("");
   const [availableDocuments, setAvailableDocuments] = useState<any[]>([]);
 
+  // Show loading state while Clerk is loading
+  if (!isLoaded) {
+    return (
+      <div className="min-h-screen flex items-center justify-center">
+        <div className="animate-spin rounded-full h-32 w-32 border-b-2 border-primary"></div>
+      </div>
+    );
+  }
+
+  // This should not be needed due to middleware, but adding as extra security
+  if (!isSignedIn) {
+    redirect('/sign-up');
+    return null;
+  }
+
   // Load available documents and restore session on component mount
   useEffect(() => {
-    loadAvailableDocuments();
-    restoreSession();
-  }, []);
+    if (isSignedIn) {
+      loadAvailableDocuments();
+      restoreSession();
+    }
+  }, [isSignedIn]);
 
   // Save active document to localStorage whenever it changes
   useEffect(() => {
-    if (activeDocument) {
-      localStorage.setItem('currentDocumentName', activeDocument);
+    if (activeDocument && user) {
+      localStorage.setItem(`currentDocumentName_${user.id}`, activeDocument);
     }
-  }, [activeDocument]);
+  }, [activeDocument, user]);
 
   // Save current persona to localStorage whenever it changes
   useEffect(() => {
-    if (currentPersonaId) {
-      localStorage.setItem('currentPersonaId', currentPersonaId);
+    if (currentPersonaId && user) {
+      localStorage.setItem(`currentPersonaId_${user.id}`, currentPersonaId);
     }
-  }, [currentPersonaId]);
+  }, [currentPersonaId, user]);
 
   const loadAvailableDocuments = async () => {
     try {
-      const response = await fetch(`${API_BASE_URL}/api/documents`);
+      const response = await fetch(`${API_BASE_URL}/api/documents`, {
+        headers: {
+          'Authorization': `Bearer ${await user?.getToken()}`,
+        }
+      });
       if (response.ok) {
         const data = await response.json();
         // Ensure we have an array of documents
@@ -76,16 +100,22 @@ export function TutorApp() {
   };
 
   const restoreSession = async () => {
-    // Try to restore previous session from localStorage
-    const storedPersonaId = localStorage.getItem('currentPersonaId');
-    const storedDocumentName = localStorage.getItem('currentDocumentName');
+    if (!user) return;
+    
+    // Try to restore previous session from localStorage with user-specific keys
+    const storedPersonaId = localStorage.getItem(`currentPersonaId_${user.id}`);
+    const storedDocumentName = localStorage.getItem(`currentDocumentName_${user.id}`);
     
     if (storedPersonaId && storedDocumentName) {
       setCurrentPersonaId(storedPersonaId);
       setActiveDocument(storedDocumentName);
         // Load chat history
       try {
-        const response = await fetch(`${API_BASE_URL}/api/chat-history/${storedDocumentName}`);
+        const response = await fetch(`${API_BASE_URL}/api/chat-history/${storedDocumentName}`, {
+          headers: {
+            'Authorization': `Bearer ${await user.getToken()}`,
+          }
+        });
         if (response.ok) {
           const data = await response.json();
           if (data.messages && data.messages.length > 0) {
@@ -96,7 +126,7 @@ export function TutorApp() {
             setMessages([
               {
                 role: "assistant",
-                content: `Welcome back! I've restored your session with "${storedDocumentName}". Let's continue our discussion.`,
+                content: `Welcome back, ${user.firstName || 'there'}! I've restored your session with "${storedDocumentName}". Let's continue our discussion.`,
               },
               ...chatMessages
             ]);
@@ -109,6 +139,8 @@ export function TutorApp() {
   };
 
   const handleDocumentUpload = async (file: File) => {
+    if (!user) return;
+    
     setIsUploading(true);
     
     try {
@@ -118,6 +150,9 @@ export function TutorApp() {
 
       const uploadResponse = await fetch(`${API_BASE_URL}/api/upload`, {
         method: "POST",
+        headers: {
+          'Authorization': `Bearer ${await user.getToken()}`,
+        },
         body: formData,
       });
 
@@ -132,15 +167,15 @@ export function TutorApp() {
       if (uploadData.persona_id) {
         setCurrentPersonaId(uploadData.persona_id);
         
-        // Store for later use
-        localStorage.setItem('currentPersonaId', uploadData.persona_id);
-        localStorage.setItem('currentDocumentName', file.name);
+        // Store for later use with user-specific keys
+        localStorage.setItem(`currentPersonaId_${user.id}`, uploadData.persona_id);
+        localStorage.setItem(`currentDocumentName_${user.id}`, file.name);
         
         setMessages((prev) => [
           ...prev,
           {
             role: "assistant",
-            content: `Perfect! I've processed "${file.name}" and created a personalized learning experience for you. I'm now ready to discuss the document content through both text and video chat. What would you like to know about it?`,
+            content: `Perfect, ${user.firstName || 'there'}! I've processed "${file.name}" and created a personalized learning experience for you. I'm now ready to discuss the document content through both text and video chat. What would you like to know about it?`,
           },
         ]);
       } else {
@@ -172,7 +207,7 @@ export function TutorApp() {
   };
 
   const handleSendMessage = async (messageContent: string) => {
-    if (!messageContent.trim()) return;
+    if (!messageContent.trim() || !user) return;
     
     setMessages((prev) => [
       ...prev,
@@ -186,6 +221,7 @@ export function TutorApp() {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
+          'Authorization': `Bearer ${await user.getToken()}`,
         },
         body: JSON.stringify({ 
           query: messageContent,
@@ -232,13 +268,20 @@ export function TutorApp() {
     if (!activeDocument) return;
     await handleSendMessage("Can you summarize this document for me?");
   };
+  
   const handleLoadDocument = async (document: any) => {
+    if (!user) return;
+    
     try {
       setActiveDocument(document.filename);
-      localStorage.setItem('currentDocumentName', document.filename);
+      localStorage.setItem(`currentDocumentName_${user.id}`, document.filename);
       
       // Try to find existing persona for this document
-      const personasResponse = await fetch(`${API_BASE_URL}/personas`);
+      const personasResponse = await fetch(`${API_BASE_URL}/personas`, {
+        headers: {
+          'Authorization': `Bearer ${await user.getToken()}`,
+        }
+      });
       if (personasResponse.ok) {
         const personasData = await personasResponse.json();
         const documentPersona = personasData.personas.find(
@@ -247,11 +290,15 @@ export function TutorApp() {
         
         if (documentPersona) {
           setCurrentPersonaId(documentPersona.persona_id);
-          localStorage.setItem('currentPersonaId', documentPersona.persona_id);
+          localStorage.setItem(`currentPersonaId_${user.id}`, documentPersona.persona_id);
         }
       }
         // Load chat history
-      const historyResponse = await fetch(`${API_BASE_URL}/api/chat-history/${document.filename}`);
+      const historyResponse = await fetch(`${API_BASE_URL}/api/chat-history/${document.filename}`, {
+        headers: {
+          'Authorization': `Bearer ${await user.getToken()}`,
+        }
+      });
       if (historyResponse.ok) {
         const historyData = await historyResponse.json();
         if (historyData.messages && historyData.messages.length > 0) {
@@ -262,7 +309,7 @@ export function TutorApp() {
           setMessages([
             {
               role: "assistant",
-              content: `I've loaded "${document.filename}" and our previous conversation. How can I help you today?`,
+              content: `I've loaded "${document.filename}" and our previous conversation. How can I help you today, ${user.firstName || 'there'}?`,
             },
             ...chatMessages
           ]);
@@ -287,6 +334,13 @@ export function TutorApp() {
       <AppHeader />
       
       <div className="container mx-auto px-4 py-6 flex-1 flex flex-col">
+        <div className="mb-4">
+          <h2 className="text-2xl font-bold text-foreground">
+            Welcome back, {user.firstName || user.emailAddresses[0]?.emailAddress || 'there'}!
+          </h2>
+          <p className="text-muted-foreground">Ready to continue learning with Mira?</p>
+        </div>
+        
         <Tabs 
           value={tab} 
           onValueChange={setTab}
@@ -390,7 +444,7 @@ export function TutorApp() {
               <CardContent className="p-6">
                 <div className="flex items-center gap-2 mb-6">
                   <History className="h-5 w-5" />
-                  <h3 className="text-lg font-semibold">Document History</h3>
+                  <h3 className="text-lg font-semibold">Your Document History</h3>
                 </div>
                   {(!availableDocuments || availableDocuments.length === 0) ? (
                   <div className="text-center py-8">

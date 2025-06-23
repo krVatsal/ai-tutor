@@ -1,4 +1,4 @@
-from fastapi import FastAPI, UploadFile, File, HTTPException, Request, Depends
+from fastapi import FastAPI, UploadFile, File, HTTPException, Request, Depends, Header
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
@@ -16,6 +16,8 @@ from langchain_google_genai import GoogleGenerativeAIEmbeddings, ChatGoogleGener
 from langchain.vectorstores import FAISS
 from langchain.chains import RetrievalQA
 from dotenv import load_dotenv
+import jwt
+from jwt import PyJWKClient
 
 # Import database models and functions
 from database import (
@@ -36,6 +38,39 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# Clerk configuration
+CLERK_PEM_PUBLIC_KEY = os.getenv("CLERK_PEM_PUBLIC_KEY")
+CLERK_JWKS_URL = "https://api.clerk.com/v1/jwks"
+
+# JWT verification for Clerk
+def verify_clerk_token(authorization: str = Header(None)):
+    if not authorization:
+        raise HTTPException(status_code=401, detail="Authorization header missing")
+    
+    try:
+        # Extract token from "Bearer <token>"
+        token = authorization.split(" ")[1] if authorization.startswith("Bearer ") else authorization
+        
+        # Get JWKS from Clerk
+        jwks_client = PyJWKClient(CLERK_JWKS_URL)
+        signing_key = jwks_client.get_signing_key_from_jwt(token)
+        
+        # Verify and decode the token
+        payload = jwt.decode(
+            token,
+            signing_key.key,
+            algorithms=["RS256"],
+            options={"verify_aud": False}  # Clerk tokens don't always have aud
+        )
+        
+        return payload
+    except jwt.ExpiredSignatureError:
+        raise HTTPException(status_code=401, detail="Token has expired")
+    except jwt.InvalidTokenError as e:
+        raise HTTPException(status_code=401, detail=f"Invalid token: {str(e)}")
+    except Exception as e:
+        raise HTTPException(status_code=401, detail=f"Token verification failed: {str(e)}")
 
 # Pydantic models for request bodies
 class ChatRequest(BaseModel):
@@ -326,9 +361,15 @@ def startup_event():
 startup_event()
 
 @app.post("/api/upload")
-async def upload_document(file: UploadFile = File(...), db: Session = Depends(get_db)):
+async def upload_document(
+    file: UploadFile = File(...), 
+    db: Session = Depends(get_db),
+    user_data: dict = Depends(verify_clerk_token)
+):
     """Upload and process PDF document"""
     try:
+        user_id = user_data.get("sub")  # Clerk user ID
+        
         # Validate file type
         if not file.filename or not file.filename.lower().endswith('.pdf'):
             raise HTTPException(status_code=400, detail="Only PDF files are supported")
@@ -344,8 +385,12 @@ async def upload_document(file: UploadFile = File(...), db: Session = Depends(ge
         # Reset file pointer
         await file.seek(0)
         
-        # Check if document already exists
-        existing_doc = db.query(Document).filter(Document.filename == file.filename).first()
+        # Check if document already exists for this user
+        existing_doc = db.query(Document).filter(
+            Document.filename == file.filename,
+            Document.user_id == user_id
+        ).first()
+        
         if existing_doc:
             # Load existing vector store
             vector_store_record = db.query(VectorStore).filter(VectorStore.document_id == existing_doc.id).first()
@@ -377,11 +422,12 @@ async def upload_document(file: UploadFile = File(...), db: Session = Depends(ge
         with open(file_path, "wb") as buffer:
             shutil.copyfileobj(file.file, buffer)
         
-        # Save document to database
+        # Save document to database with user_id
         db_document = Document(
             id=document_id,
             filename=file.filename,
             file_path=file_path,
+            user_id=user_id,  # Associate with user
             processed=False
         )
         db.add(db_document)
@@ -436,7 +482,11 @@ async def upload_document(file: UploadFile = File(...), db: Session = Depends(ge
         raise HTTPException(status_code=500, detail=f"Failed to process document: {str(e)}")
 
 @app.post("/create-conversation")
-async def create_conversation_endpoint(request: ConversationRequest, db: Session = Depends(get_db)):
+async def create_conversation_endpoint(
+    request: ConversationRequest, 
+    db: Session = Depends(get_db),
+    user_data: dict = Depends(verify_clerk_token)
+):
     """Create a Tavus conversation with persona"""
     try:
         # Check if conversation already exists for this persona
@@ -461,7 +511,11 @@ async def create_conversation_endpoint(request: ConversationRequest, db: Session
         raise HTTPException(status_code=500, detail=f"Failed to create conversation: {str(e)}")
 
 @app.post("/generate-speech")
-async def generate_speech(request: SpeechRequest, db: Session = Depends(get_db)):
+async def generate_speech(
+    request: SpeechRequest, 
+    db: Session = Depends(get_db),
+    user_data: dict = Depends(verify_clerk_token)
+):
     """Generate speech/video from text"""
     try:
         if not TAVUS_API_KEY:
@@ -499,7 +553,10 @@ async def generate_speech(request: SpeechRequest, db: Session = Depends(get_db))
         raise HTTPException(status_code=500, detail=f"Failed to generate speech: {str(e)}")
 
 @app.get("/speech-status/{speech_id}")
-async def get_speech_status(speech_id: str):
+async def get_speech_status(
+    speech_id: str,
+    user_data: dict = Depends(verify_clerk_token)
+):
     """Get speech generation status"""
     try:
         if not TAVUS_API_KEY:
@@ -595,9 +652,15 @@ async def tavus_webhook(request: Request, db: Session = Depends(get_db)):
         return {"success": False, "error": str(e)}
 
 @app.post("/api/chat")
-async def chat_with_document(request: ChatRequest, db: Session = Depends(get_db)):
+async def chat_with_document(
+    request: ChatRequest, 
+    db: Session = Depends(get_db),
+    user_data: dict = Depends(verify_clerk_token)
+):
     """Chat with AI about the document using vector search"""
     try:
+        user_id = user_data.get("sub")
+        
         if not request.document_name:
             raise HTTPException(status_code=400, detail="Document name is required")
         
@@ -616,18 +679,22 @@ async def chat_with_document(request: ChatRequest, db: Session = Depends(get_db)
         if len(request.query) > 2000:
             raise HTTPException(status_code=400, detail="Query too long (max 2000 characters)")
         
-        # Save user message to database
+        # Save user message to database with user_id
         user_message = ChatMessage(
             document_name=request.document_name,
             role="user",
-            content=request.query
+            content=request.query,
+            user_id=user_id
         )
         db.add(user_message)
         
         # Check if vector store is in cache
         if request.document_name not in vector_stores_cache:
-            # Try to load from database
-            document = db.query(Document).filter(Document.filename == request.document_name).first()
+            # Try to load from database for this user
+            document = db.query(Document).filter(
+                Document.filename == request.document_name,
+                Document.user_id == user_id
+            ).first()
             if not document:
                 raise HTTPException(status_code=400, detail="Document not found")
             
@@ -667,11 +734,12 @@ async def chat_with_document(request: ChatRequest, db: Session = Depends(get_db)
             context = "\n\n".join([doc.page_content for doc in relevant_docs])
             response_text = f"Based on the document content, here's what I found relevant to your question '{request.query}':\n\n{context[:500]}..."
         
-        # Save assistant message to database
+        # Save assistant message to database with user_id
         assistant_message = ChatMessage(
             document_name=request.document_name,
             role="assistant",
-            content=response_text
+            content=response_text,
+            user_id=user_id
         )
         db.add(assistant_message)
         db.commit()
@@ -685,15 +753,24 @@ async def chat_with_document(request: ChatRequest, db: Session = Depends(get_db)
         raise HTTPException(status_code=500, detail=f"Failed to process chat: {str(e)}")
 
 @app.post("/api/summarize")
-async def summarize_document(request: SummarizeRequest, db: Session = Depends(get_db)):
+async def summarize_document(
+    request: SummarizeRequest, 
+    db: Session = Depends(get_db),
+    user_data: dict = Depends(verify_clerk_token)
+):
     """Generate a summary of the document"""
     try:
+        user_id = user_data.get("sub")
+        
         print(f"Summarize request for document: {request.document_name}")
         
         # Check if vector store exists in cache
         if request.document_name not in vector_stores_cache:
-            # Try to load from database
-            document = db.query(Document).filter(Document.filename == request.document_name).first()
+            # Try to load from database for this user
+            document = db.query(Document).filter(
+                Document.filename == request.document_name,
+                Document.user_id == user_id
+            ).first()
             if not document:
                 raise HTTPException(status_code=400, detail="Document not found")
             
@@ -724,18 +801,20 @@ async def summarize_document(request: SummarizeRequest, db: Session = Depends(ge
         # Extract text from response
         summary_text = summary_response.get('result', summary_response) if isinstance(summary_response, dict) else str(summary_response)
         
-        # Save messages to database
+        # Save messages to database with user_id
         user_message = ChatMessage(
             document_name=request.document_name,
             role="user",
-            content="Can you summarize this document?"
+            content="Can you summarize this document?",
+            user_id=user_id
         )
         db.add(user_message)
         
         assistant_message = ChatMessage(
             document_name=request.document_name,
             role="assistant",
-            content=summary_text
+            content=summary_text,
+            user_id=user_id
         )
         db.add(assistant_message)
         db.commit()
@@ -746,11 +825,18 @@ async def summarize_document(request: SummarizeRequest, db: Session = Depends(ge
         raise HTTPException(status_code=500, detail=f"Failed to summarize document: {str(e)}")
 
 @app.get("/api/chat-history/{document_name}")
-async def get_chat_history(document_name: str, db: Session = Depends(get_db)):
+async def get_chat_history(
+    document_name: str, 
+    db: Session = Depends(get_db),
+    user_data: dict = Depends(verify_clerk_token)
+):
     """Get chat history for a document"""
     try:
+        user_id = user_data.get("sub")
+        
         messages = db.query(ChatMessage).filter(
-            ChatMessage.document_name == document_name
+            ChatMessage.document_name == document_name,
+            ChatMessage.user_id == user_id
         ).order_by(ChatMessage.timestamp).all()
         
         return {
@@ -768,10 +854,17 @@ async def get_chat_history(document_name: str, db: Session = Depends(get_db)):
         raise HTTPException(status_code=500, detail=f"Failed to get chat history: {str(e)}")
 
 @app.get("/documents")
-async def get_documents(db: Session = Depends(get_db)):
-    """Get all uploaded documents"""
+async def get_documents(
+    db: Session = Depends(get_db),
+    user_data: dict = Depends(verify_clerk_token)
+):
+    """Get all uploaded documents for the authenticated user"""
     try:
-        documents = db.query(Document).order_by(Document.upload_date.desc()).all()
+        user_id = user_data.get("sub")
+        
+        documents = db.query(Document).filter(
+            Document.user_id == user_id
+        ).order_by(Document.upload_date.desc()).all()
         
         return {
             "documents": [
@@ -789,11 +882,18 @@ async def get_documents(db: Session = Depends(get_db)):
         raise HTTPException(status_code=500, detail=f"Failed to get documents: {str(e)}")
 
 @app.get("/api/documents")
-async def list_documents(db: Session = Depends(get_db)):
-    """List all available documents and their vector stores"""
+async def list_documents(
+    db: Session = Depends(get_db),
+    user_data: dict = Depends(verify_clerk_token)
+):
+    """List all available documents and their vector stores for the authenticated user"""
     try:
-        # Get documents from database
-        documents_from_db = db.query(Document).all()
+        user_id = user_data.get("sub")
+        
+        # Get documents from database for this user
+        documents_from_db = db.query(Document).filter(
+            Document.user_id == user_id
+        ).all()
         
         # Get vector stores from memory cache
         vector_stores_list = list(vector_stores_cache.keys())
@@ -804,7 +904,7 @@ async def list_documents(db: Session = Depends(get_db)):
                     "id": doc.id,
                     "filename": doc.filename,
                     "file_path": doc.file_path,
-                    "uploaded_at": doc.uploaded_at.isoformat() if doc.uploaded_at else None,
+                    "upload_date": doc.upload_date.isoformat() if doc.upload_date else None,
                     "has_vector_store": doc.filename in vector_stores_cache
                 }
                 for doc in documents_from_db
@@ -817,10 +917,19 @@ async def list_documents(db: Session = Depends(get_db)):
         raise HTTPException(status_code=500, detail=f"Failed to list documents: {str(e)}")
 
 @app.get("/personas")
-async def get_personas(db: Session = Depends(get_db)):
-    """Get all created personas"""
+async def get_personas(
+    db: Session = Depends(get_db),
+    user_data: dict = Depends(verify_clerk_token)
+):
+    """Get all created personas for the authenticated user"""
     try:
-        personas = db.query(Persona).filter(Persona.active == True).order_by(Persona.created_date.desc()).all()
+        user_id = user_data.get("sub")
+        
+        # Get personas for documents owned by this user
+        personas = db.query(Persona).join(Document).filter(
+            Document.user_id == user_id,
+            Persona.active == True
+        ).order_by(Persona.created_date.desc()).all()
         
         return {
             "personas": [
@@ -840,7 +949,7 @@ async def get_personas(db: Session = Depends(get_db)):
 
 @app.get("/")
 async def root():
-    return {"message": "Mira AI Tutor API is running with database persistence"}
+    return {"message": "Mira AI Tutor API is running with database persistence and Clerk authentication"}
 
 @app.get("/health")
 async def health_check():
@@ -849,7 +958,8 @@ async def health_check():
         "status": "healthy",
         "embeddings_available": embeddings is not None,
         "tavus_configured": TAVUS_API_KEY is not None,
-        "database": "connected"
+        "database": "connected",
+        "auth": "clerk_enabled"
     }
 
 if __name__ == "__main__":

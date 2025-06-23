@@ -23,6 +23,7 @@ class Document(Base):
     text_content = Column(Text)
     upload_date = Column(DateTime, default=datetime.utcnow)
     processed = Column(Boolean, default=False)
+    user_id = Column(String, index=True)  # Clerk user ID
 
 class Persona(Base):
     __tablename__ = "personas"
@@ -58,6 +59,7 @@ class ChatMessage(Base):
     content = Column(Text)
     timestamp = Column(DateTime, default=datetime.utcnow)
     conversation_id = Column(String, nullable=True)
+    user_id = Column(String, index=True)  # Clerk user ID
 
 class VectorStore(Base):
     __tablename__ = "vector_stores"
