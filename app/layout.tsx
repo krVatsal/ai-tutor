@@ -3,7 +3,14 @@ import type { Metadata } from 'next';
 import { Inter } from 'next/font/google';
 import { ThemeProvider } from '@/components/theme-provider';
 import { Toaster } from '@/components/ui/toaster';
-
+import {
+  ClerkProvider,
+  SignInButton,
+  SignUpButton,
+  SignedIn,
+  SignedOut,
+  UserButton,
+} from '@clerk/nextjs'
 const inter = Inter({ subsets: ['latin'] });
 
 export const metadata: Metadata = {
@@ -17,6 +24,7 @@ export default function RootLayout({
   children: React.ReactNode;
 }) {
   return (
+    <ClerkProvider>
     <html lang="en" suppressHydrationWarning>
       <body className={inter.className}>
         <ThemeProvider
@@ -25,10 +33,20 @@ export default function RootLayout({
           enableSystem
           disableTransitionOnChange
         >
+        <header className="flex justify-end items-center p-4 gap-4 h-16">
+            <SignedOut>
+              <SignInButton />
+              <SignUpButton />
+            </SignedOut>
+            <SignedIn>
+              <UserButton />
+            </SignedIn>
+          </header>
           {children}
           <Toaster />
         </ThemeProvider>
       </body>
     </html>
+    </ClerkProvider>
   );
 }
