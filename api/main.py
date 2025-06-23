@@ -11,9 +11,9 @@ import json
 import pickle
 from datetime import datetime
 from langchain.text_splitter import RecursiveCharacterTextSplitter
-from langchain.document_loaders import PyPDFLoader
+from langchain_community.document_loaders import PyPDFLoader
 from langchain_google_genai import GoogleGenerativeAIEmbeddings
-from langchain.vectorstores import FAISS
+from langchain_community.vectorstores import FAISS
 from dotenv import load_dotenv
 
 # Import database models and functions
@@ -44,7 +44,11 @@ os.makedirs("uploads", exist_ok=True)
 os.makedirs("vector_db", exist_ok=True)
 
 # Initialize Gemini embeddings
-embeddings = GoogleGenerativeAIEmbeddings(model="models/embedding-001")
+try:
+    embeddings = GoogleGenerativeAIEmbeddings(model="models/embedding-001")
+except Exception as e:
+    print(f"Warning: Could not initialize embeddings: {e}")
+    embeddings = None
 
 # In-memory cache for vector stores (loaded from DB on startup)
 vector_stores_cache = {}
@@ -74,48 +78,70 @@ class ChatRequest(BaseModel):
 
 def load_vector_stores_from_db(db: Session):
     """Load vector stores from database on startup"""
+    if not embeddings:
+        print("Skipping vector store loading - embeddings not available")
+        return
+        
     vector_stores = db.query(VectorStore).all()
     for vs in vector_stores:
         try:
             if os.path.exists(vs.vector_store_path):
-                vector_store = FAISS.load_local(vs.vector_store_path, embeddings, allow_dangerous_deserialization=True)
+                vector_store = FAISS.load_local(
+                    vs.vector_store_path, 
+                    embeddings, 
+                    allow_dangerous_deserialization=True
+                )
                 # Get document info
                 doc = db.query(Document).filter(Document.id == vs.document_id).first()
                 if doc:
                     vector_stores_cache[doc.filename] = vector_store
+                    print(f"Loaded vector store for: {doc.filename}")
         except Exception as e:
             print(f"Failed to load vector store {vs.id}: {e}")
 
 def process_document(file_path: str, document_id: str, db: Session):
     """Process PDF document and create vector store"""
-    # Load PDF document
-    loader = PyPDFLoader(file_path)
-    documents = loader.load()
+    if not embeddings:
+        raise HTTPException(status_code=500, detail="Embeddings not available")
     
-    # Split text into chunks
-    text_splitter = RecursiveCharacterTextSplitter(
-        chunk_size=1000,
-        chunk_overlap=200,
-    )
-    splits = text_splitter.split_documents(documents)
-    
-    # Create and save vector store
-    vector_store = FAISS.from_documents(splits, embeddings)
-    
-    # Save vector store to disk
-    vector_store_path = f"vector_db/{document_id}"
-    vector_store.save_local(vector_store_path)
-    
-    # Save vector store info to database
-    db_vector_store = VectorStore(
-        id=str(uuid.uuid4()),
-        document_id=document_id,
-        vector_store_path=vector_store_path
-    )
-    db.add(db_vector_store)
-    db.commit()
-    
-    return vector_store, documents
+    try:
+        # Load PDF document
+        loader = PyPDFLoader(file_path)
+        documents = loader.load()
+        
+        if not documents:
+            raise HTTPException(status_code=400, detail="Could not extract text from PDF")
+        
+        # Split text into chunks
+        text_splitter = RecursiveCharacterTextSplitter(
+            chunk_size=1000,
+            chunk_overlap=200,
+        )
+        splits = text_splitter.split_documents(documents)
+        
+        if not splits:
+            raise HTTPException(status_code=400, detail="Could not split document into chunks")
+        
+        # Create and save vector store
+        vector_store = FAISS.from_documents(splits, embeddings)
+        
+        # Save vector store to disk
+        vector_store_path = f"vector_db/{document_id}"
+        vector_store.save_local(vector_store_path)
+        
+        # Save vector store info to database
+        db_vector_store = VectorStore(
+            id=str(uuid.uuid4()),
+            document_id=document_id,
+            vector_store_path=vector_store_path
+        )
+        db.add(db_vector_store)
+        db.commit()
+        
+        return vector_store, documents
+    except Exception as e:
+        print(f"Error processing document: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to process document: {str(e)}")
 
 def extract_text_from_documents(documents_list):
     """Extract text content from document list"""
@@ -126,6 +152,9 @@ def extract_text_from_documents(documents_list):
 
 async def create_tavus_persona(document_text: str, document_name: str, document_id: str, db: Session) -> Dict[str, Any]:
     """Create a Tavus persona with document context"""
+    
+    if not TAVUS_API_KEY:
+        raise HTTPException(status_code=500, detail="Tavus API key not configured")
     
     # Truncate document text if too long (Tavus has limits)
     max_context_length = 8000
@@ -189,39 +218,48 @@ Always be helpful, patient, and encouraging in your responses. Keep your answers
         "x-api-key": TAVUS_API_KEY
     }
     
-    async with httpx.AsyncClient() as client:
-        response = await client.post(
-            f"{TAVUS_API_URL}/personas",
-            json=persona_data,
-            headers=headers,
-            timeout=30.0
-        )
-        
-        if response.status_code != 200:
-            raise HTTPException(
-                status_code=response.status_code,
-                detail=f"Failed to create persona: {response.text}"
+    try:
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            response = await client.post(
+                f"{TAVUS_API_URL}/personas",
+                json=persona_data,
+                headers=headers
             )
-        
-        persona_response = response.json()
-        
-        # Save persona to database
-        db_persona = Persona(
-            id=str(uuid.uuid4()),
-            document_id=document_id,
-            document_name=document_name,
-            persona_id=persona_response.get("persona_id"),
-            persona_name=persona_data["persona_name"],
-            system_prompt=persona_data["system_prompt"],
-            context=document_text
-        )
-        db.add(db_persona)
-        db.commit()
-        
-        return persona_response
+            
+            if response.status_code != 200:
+                error_detail = f"Tavus API error: {response.status_code} - {response.text}"
+                print(error_detail)
+                raise HTTPException(
+                    status_code=response.status_code,
+                    detail=error_detail
+                )
+            
+            persona_response = response.json()
+            
+            # Save persona to database
+            db_persona = Persona(
+                id=str(uuid.uuid4()),
+                document_id=document_id,
+                document_name=document_name,
+                persona_id=persona_response.get("persona_id"),
+                persona_name=persona_data["persona_name"],
+                system_prompt=persona_data["system_prompt"],
+                context=document_text
+            )
+            db.add(db_persona)
+            db.commit()
+            
+            return persona_response
+    except httpx.TimeoutException:
+        raise HTTPException(status_code=408, detail="Tavus API request timed out")
+    except httpx.RequestError as e:
+        raise HTTPException(status_code=500, detail=f"Tavus API request failed: {str(e)}")
 
 async def create_tavus_conversation(persona_id: str, document_name: str, db: Session) -> Dict[str, Any]:
     """Create a Tavus conversation with persona"""
+    
+    if not TAVUS_API_KEY:
+        raise HTTPException(status_code=500, detail="Tavus API key not configured")
     
     conversation_data = {
         "replica_id": TAVUS_REPLICA_ID,
@@ -242,61 +280,84 @@ async def create_tavus_conversation(persona_id: str, document_name: str, db: Ses
         "x-api-key": TAVUS_API_KEY
     }
     
-    async with httpx.AsyncClient() as client:
-        response = await client.post(
-            f"{TAVUS_API_URL}/conversations",
-            json=conversation_data,
-            headers=headers,
-            timeout=30.0
-        )
-        
-        if response.status_code != 200:
-            raise HTTPException(
-                status_code=response.status_code,
-                detail=f"Failed to create conversation: {response.text}"
+    try:
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            response = await client.post(
+                f"{TAVUS_API_URL}/conversations",
+                json=conversation_data,
+                headers=headers
             )
-        
-        conversation_response = response.json()
-        
-        # Save conversation to database
-        db_conversation = Conversation(
-            id=str(uuid.uuid4()),
-            persona_id=persona_id,
-            conversation_id=conversation_response.get("conversation_id"),
-            conversation_url=conversation_response.get("conversation_url"),
-            document_name=document_name
-        )
-        db.add(db_conversation)
-        db.commit()
-        
-        return conversation_response
+            
+            if response.status_code != 200:
+                error_detail = f"Tavus API error: {response.status_code} - {response.text}"
+                print(error_detail)
+                raise HTTPException(
+                    status_code=response.status_code,
+                    detail=error_detail
+                )
+            
+            conversation_response = response.json()
+            
+            # Save conversation to database
+            db_conversation = Conversation(
+                id=str(uuid.uuid4()),
+                persona_id=persona_id,
+                conversation_id=conversation_response.get("conversation_id"),
+                conversation_url=conversation_response.get("conversation_url"),
+                document_name=document_name
+            )
+            db.add(db_conversation)
+            db.commit()
+            
+            return conversation_response
+    except httpx.TimeoutException:
+        raise HTTPException(status_code=408, detail="Tavus API request timed out")
+    except httpx.RequestError as e:
+        raise HTTPException(status_code=500, detail=f"Tavus API request failed: {str(e)}")
 
 @app.on_event("startup")
 async def startup_event():
     """Load vector stores from database on startup"""
-    db = next(get_db())
-    load_vector_stores_from_db(db)
-    print("Vector stores loaded from database")
+    try:
+        db = next(get_db())
+        load_vector_stores_from_db(db)
+        print("Startup completed - Vector stores loaded from database")
+    except Exception as e:
+        print(f"Startup error: {e}")
 
 @app.post("/upload")
 async def upload_document(file: UploadFile = File(...), db: Session = Depends(get_db)):
     """Upload and process PDF document"""
     try:
         # Validate file type
-        if not file.filename.endswith('.pdf'):
+        if not file.filename or not file.filename.lower().endswith('.pdf'):
             raise HTTPException(status_code=400, detail="Only PDF files are supported")
+        
+        # Validate file size (10MB limit)
+        file_size = 0
+        content = await file.read()
+        file_size = len(content)
+        
+        if file_size > 10 * 1024 * 1024:  # 10MB
+            raise HTTPException(status_code=400, detail="File size exceeds 10MB limit")
+        
+        # Reset file pointer
+        await file.seek(0)
         
         # Check if document already exists
         existing_doc = db.query(Document).filter(Document.filename == file.filename).first()
         if existing_doc:
             # Load existing vector store
             vector_store_record = db.query(VectorStore).filter(VectorStore.document_id == existing_doc.id).first()
-            if vector_store_record and os.path.exists(vector_store_record.vector_store_path):
-                vector_stores_cache[file.filename] = FAISS.load_local(
-                    vector_store_record.vector_store_path, 
-                    embeddings, 
-                    allow_dangerous_deserialization=True
-                )
+            if vector_store_record and os.path.exists(vector_store_record.vector_store_path) and embeddings:
+                try:
+                    vector_stores_cache[file.filename] = FAISS.load_local(
+                        vector_store_record.vector_store_path, 
+                        embeddings, 
+                        allow_dangerous_deserialization=True
+                    )
+                except Exception as e:
+                    print(f"Error loading existing vector store: {e}")
             
             # Get existing persona
             existing_persona = db.query(Persona).filter(Persona.document_id == existing_doc.id).first()
@@ -313,8 +374,9 @@ async def upload_document(file: UploadFile = File(...), db: Session = Depends(ge
         document_id = str(uuid.uuid4())
         file_path = f"uploads/{document_id}.pdf"
         
+        # Save file to disk
         with open(file_path, "wb") as buffer:
-            shutil.copyfileobj(file.file, buffer)
+            buffer.write(content)
         
         # Process document and create vector store
         vector_store, doc_list = process_document(file_path, document_id, db)
@@ -327,7 +389,7 @@ async def upload_document(file: UploadFile = File(...), db: Session = Depends(ge
             id=document_id,
             filename=file.filename,
             file_path=file_path,
-            content_type=file.content_type,
+            content_type=file.content_type or "application/pdf",
             text_content=document_text,
             processed=True
         )
@@ -338,28 +400,28 @@ async def upload_document(file: UploadFile = File(...), db: Session = Depends(ge
         vector_stores_cache[file.filename] = vector_store
         
         # Create Tavus persona with document context
+        persona_id = None
         try:
-            persona_response = await create_tavus_persona(document_text, file.filename, document_id, db)
-            
-            return {
-                "success": True,
-                "document_id": document_id,
-                "filename": file.filename,
-                "persona_id": persona_response.get("persona_id"),
-                "message": "Document processed, vectorized, and persona created successfully"
-            }
+            if TAVUS_API_KEY:
+                persona_response = await create_tavus_persona(document_text, file.filename, document_id, db)
+                persona_id = persona_response.get("persona_id")
         except Exception as persona_error:
             print(f"Persona creation failed: {persona_error}")
-            # Still return success for document processing
-            return {
-                "success": True,
-                "document_id": document_id,
-                "filename": file.filename,
-                "persona_id": None,
-                "message": "Document processed and vectorized successfully (persona creation failed)"
-            }
+            # Continue without persona - document processing was successful
+        
+        return {
+            "success": True,
+            "document_id": document_id,
+            "filename": file.filename,
+            "persona_id": persona_id,
+            "message": "Document processed and vectorized successfully" + 
+                      (" with persona created" if persona_id else " (persona creation failed)")
+        }
     
+    except HTTPException:
+        raise
     except Exception as e:
+        print(f"Upload error: {e}")
         raise HTTPException(status_code=500, detail=f"Failed to process document: {str(e)}")
 
 @app.post("/create-conversation")
@@ -381,13 +443,19 @@ async def create_conversation_endpoint(request: ConversationRequest, db: Session
         
         conversation_response = await create_tavus_conversation(request.persona_id, request.document_name, db)
         return conversation_response
+    except HTTPException:
+        raise
     except Exception as e:
+        print(f"Conversation creation error: {e}")
         raise HTTPException(status_code=500, detail=f"Failed to create conversation: {str(e)}")
 
 @app.post("/generate-speech")
 async def generate_speech(request: SpeechRequest, db: Session = Depends(get_db)):
     """Generate speech/video from text"""
     try:
+        if not TAVUS_API_KEY:
+            raise HTTPException(status_code=500, detail="Tavus API key not configured")
+        
         speech_data = {
             "conversation_id": request.conversation_id,
             "text": request.text
@@ -398,12 +466,11 @@ async def generate_speech(request: SpeechRequest, db: Session = Depends(get_db))
             "x-api-key": TAVUS_API_KEY
         }
         
-        async with httpx.AsyncClient() as client:
+        async with httpx.AsyncClient(timeout=30.0) as client:
             response = await client.post(
                 f"{TAVUS_API_URL}/speech",
                 json=speech_data,
-                headers=headers,
-                timeout=30.0
+                headers=headers
             )
             
             if response.status_code != 200:
@@ -414,22 +481,27 @@ async def generate_speech(request: SpeechRequest, db: Session = Depends(get_db))
             
             return response.json()
     
+    except HTTPException:
+        raise
     except Exception as e:
+        print(f"Speech generation error: {e}")
         raise HTTPException(status_code=500, detail=f"Failed to generate speech: {str(e)}")
 
 @app.get("/speech-status/{speech_id}")
 async def get_speech_status(speech_id: str):
     """Get speech generation status"""
     try:
+        if not TAVUS_API_KEY:
+            raise HTTPException(status_code=500, detail="Tavus API key not configured")
+        
         headers = {
             "x-api-key": TAVUS_API_KEY
         }
         
-        async with httpx.AsyncClient() as client:
+        async with httpx.AsyncClient(timeout=30.0) as client:
             response = await client.get(
                 f"{TAVUS_API_URL}/speech/{speech_id}",
-                headers=headers,
-                timeout=30.0
+                headers=headers
             )
             
             if response.status_code != 200:
@@ -440,7 +512,10 @@ async def get_speech_status(speech_id: str):
             
             return response.json()
     
+    except HTTPException:
+        raise
     except Exception as e:
+        print(f"Speech status error: {e}")
         raise HTTPException(status_code=500, detail=f"Failed to get speech status: {str(e)}")
 
 @app.post("/tavus-webhook")
@@ -474,8 +549,13 @@ async def tavus_webhook(request: Request, db: Session = Depends(get_db)):
             
             # Save user message to database
             if conversation_id and utterance:
+                # Find the conversation to get document name
+                conversation = db.query(Conversation).filter(
+                    Conversation.conversation_id == conversation_id
+                ).first()
+                
                 chat_message = ChatMessage(
-                    document_name="video_chat",
+                    document_name=conversation.document_name if conversation else "video_chat",
                     role="user",
                     content=utterance,
                     conversation_id=conversation_id
@@ -501,7 +581,7 @@ async def tavus_webhook(request: Request, db: Session = Depends(get_db)):
     
     except Exception as e:
         print(f"Webhook processing error: {e}")
-        raise HTTPException(status_code=500, detail="Webhook processing failed")
+        return {"success": False, "error": str(e)}
 
 @app.post("/chat")
 async def chat_with_document(request: ChatRequest, db: Session = Depends(get_db)):
@@ -509,6 +589,9 @@ async def chat_with_document(request: ChatRequest, db: Session = Depends(get_db)
     try:
         if not request.document_name:
             raise HTTPException(status_code=400, detail="Document name is required")
+        
+        if not embeddings:
+            raise HTTPException(status_code=500, detail="Embeddings not available")
         
         # Save user message to database
         user_message = ChatMessage(
@@ -530,18 +613,25 @@ async def chat_with_document(request: ChatRequest, db: Session = Depends(get_db)
                 raise HTTPException(status_code=400, detail="Vector store not found")
             
             # Load vector store
-            vector_stores_cache[request.document_name] = FAISS.load_local(
-                vector_store_record.vector_store_path, 
-                embeddings, 
-                allow_dangerous_deserialization=True
-            )
+            try:
+                vector_stores_cache[request.document_name] = FAISS.load_local(
+                    vector_store_record.vector_store_path, 
+                    embeddings, 
+                    allow_dangerous_deserialization=True
+                )
+            except Exception as e:
+                raise HTTPException(status_code=500, detail=f"Failed to load vector store: {str(e)}")
         
         # Get vector store for the document
         vector_store = vector_stores_cache[request.document_name]
         
         # Search for relevant content
-        relevant_docs = vector_store.similarity_search(request.query, k=3)
-        context = "\n\n".join([doc.page_content for doc in relevant_docs])
+        try:
+            relevant_docs = vector_store.similarity_search(request.query, k=3)
+            context = "\n\n".join([doc.page_content for doc in relevant_docs])
+        except Exception as e:
+            print(f"Vector search error: {e}")
+            context = "Unable to search document content"
         
         # Simple response generation (you could integrate with your LLM here)
         response_text = f"Based on the document content, here's what I found relevant to your question '{request.query}':\n\n{context[:500]}..."
@@ -557,7 +647,10 @@ async def chat_with_document(request: ChatRequest, db: Session = Depends(get_db)
         
         return {"response": response_text}
     
+    except HTTPException:
+        raise
     except Exception as e:
+        print(f"Chat error: {e}")
         raise HTTPException(status_code=500, detail=f"Failed to process chat: {str(e)}")
 
 @app.get("/chat-history/{document_name}")
@@ -579,6 +672,7 @@ async def get_chat_history(document_name: str, db: Session = Depends(get_db)):
             ]
         }
     except Exception as e:
+        print(f"Chat history error: {e}")
         raise HTTPException(status_code=500, detail=f"Failed to get chat history: {str(e)}")
 
 @app.get("/documents")
@@ -599,6 +693,7 @@ async def get_documents(db: Session = Depends(get_db)):
             ]
         }
     except Exception as e:
+        print(f"Documents error: {e}")
         raise HTTPException(status_code=500, detail=f"Failed to get documents: {str(e)}")
 
 @app.get("/personas")
@@ -620,11 +715,22 @@ async def get_personas(db: Session = Depends(get_db)):
             ]
         }
     except Exception as e:
+        print(f"Personas error: {e}")
         raise HTTPException(status_code=500, detail=f"Failed to get personas: {str(e)}")
 
 @app.get("/")
 async def root():
     return {"message": "Mira AI Tutor API is running with database persistence"}
+
+@app.get("/health")
+async def health_check():
+    """Health check endpoint"""
+    return {
+        "status": "healthy",
+        "embeddings_available": embeddings is not None,
+        "tavus_configured": TAVUS_API_KEY is not None,
+        "database": "connected"
+    }
 
 if __name__ == "__main__":
     import uvicorn
