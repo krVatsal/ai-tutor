@@ -1,18 +1,27 @@
-from fastapi import FastAPI, UploadFile, File, HTTPException, Request
+from fastapi import FastAPI, UploadFile, File, HTTPException, Request, Depends
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
+from sqlalchemy.orm import Session
 from typing import Optional, List, Dict, Any
 import os
 import shutil
 import uuid
 import httpx
 import json
+import pickle
+from datetime import datetime
 from langchain.text_splitter import RecursiveCharacterTextSplitter
 from langchain.document_loaders import PyPDFLoader
 from langchain_google_genai import GoogleGenerativeAIEmbeddings, ChatGoogleGenerativeAI
 from langchain.vectorstores import FAISS
 from langchain.chains import RetrievalQA
 from dotenv import load_dotenv
+
+# Import database models and functions
+from database import (
+    create_tables, get_db, Document, Persona, Conversation, 
+    ChatMessage, VectorStore, engine
+)
 
 # Load environment variables
 load_dotenv()
@@ -40,14 +49,19 @@ class SummarizeRequest(BaseModel):
 os.makedirs("uploads", exist_ok=True)
 os.makedirs("vector_db", exist_ok=True)
 
+# Initialize database
+create_tables()
+
 # Initialize Gemini embeddings and LLM
 embeddings = GoogleGenerativeAIEmbeddings(model="models/gemini-embedding-exp-03-07")
 llm = ChatGoogleGenerativeAI(model="gemini-2.0-flash")
 
-# Store document data and vector stores
+# In-memory cache for vector stores (loaded from DB on startup)
+vector_stores_cache = {}
+
+# Legacy compatibility - keeping for backward compatibility
 documents = {}
 vector_stores = {}
-personas = {}
 
 # Tavus API configuration
 TAVUS_API_URL = os.getenv("TAVUS_API_URL", "https://tavusapi.com/v2")
@@ -72,20 +86,51 @@ class ChatRequest(BaseModel):
     query: str
     document_name: Optional[str] = None
 
-def process_document(file_path: str):
+def load_vector_stores_from_db(db: Session):
+    """Load vector stores from database on startup"""
+    vector_stores = db.query(VectorStore).all()
+    for vs in vector_stores:
+        try:
+            if os.path.exists(vs.vector_store_path):
+                vector_store = FAISS.load_local(vs.vector_store_path, embeddings, allow_dangerous_deserialization=True)
+                # Get document info
+                doc = db.query(Document).filter(Document.id == vs.document_id).first()
+                if doc:
+                    vector_stores_cache[doc.filename] = vector_store
+        except Exception as e:
+            print(f"Failed to load vector store {vs.id}: {e}")
+
+def process_document(file_path: str, document_id: str, db: Session):
     """Process PDF document and create vector store"""
     # Load PDF document
     loader = PyPDFLoader(file_path)
-    documents = loader.load()
+    doc_list = loader.load()
     
     # Split text into chunks
     text_splitter = RecursiveCharacterTextSplitter(
         chunk_size=1000,
         chunk_overlap=200,
     )
-    splits = text_splitter.split_documents(documents)
-      # Create vector store
+    splits = text_splitter.split_documents(doc_list)
+    
+    # Create vector store
     vector_store = FAISS.from_documents(splits, embeddings)
+    
+    # Save vector store to disk
+    vector_store_path = f"vector_db/{document_id}"
+    vector_store.save_local(vector_store_path)
+    
+    # Save vector store info to database
+    db_vector_store = VectorStore(
+        id=str(uuid.uuid4()),
+        document_id=document_id,
+        vector_store_path=vector_store_path
+    )
+    db.add(db_vector_store)
+    db.commit()
+    
+    return vector_store, doc_list, vector_store_path
+    
     return vector_store, documents
 
 def extract_text_from_documents(documents_list):
@@ -95,7 +140,7 @@ def extract_text_from_documents(documents_list):
         text_content += doc.page_content + "\n\n"
     return text_content.strip()
 
-async def create_tavus_persona(document_text: str, document_name: str) -> Dict[str, Any]:
+async def create_tavus_persona(document_text: str, document_name: str, document_id: str, db: Session) -> Dict[str, Any]:
     """Create a Tavus persona with document context"""
     
     # Truncate document text if too long (Tavus has limits)
@@ -174,9 +219,24 @@ Always be helpful, patient, and encouraging in your responses. Keep your answers
                 detail=f"Failed to create persona: {response.text}"
             )
         
-        return response.json()
+        persona_response = response.json()
+        
+        # Save persona to database
+        db_persona = Persona(
+            id=str(uuid.uuid4()),
+            document_id=document_id,
+            document_name=document_name,
+            persona_id=persona_response.get("persona_id"),
+            persona_name=persona_data["persona_name"],
+            system_prompt=persona_data["system_prompt"],
+            context=document_text
+        )
+        db.add(db_persona)
+        db.commit()
+        
+        return persona_response
 
-async def create_tavus_conversation(persona_id: str, document_name: str) -> Dict[str, Any]:
+async def create_tavus_conversation(persona_id: str, document_name: str, db: Session) -> Dict[str, Any]:
     """Create a Tavus conversation with persona"""
     
     conversation_data = {
@@ -212,15 +272,68 @@ async def create_tavus_conversation(persona_id: str, document_name: str) -> Dict
                 detail=f"Failed to create conversation: {response.text}"
             )
         
-        return response.json()
+        conversation_response = response.json()
+        
+        # Save conversation to database
+        db_conversation = Conversation(
+            id=str(uuid.uuid4()),
+            persona_id=persona_id,
+            conversation_id=conversation_response.get("conversation_id"),
+            conversation_url=conversation_response.get("conversation_url"),
+            document_name=document_name
+        )
+        db.add(db_conversation)
+        db.commit()
+        
+        return conversation_response
+
+# Load existing vector stores on startup
+def startup_event():
+    """Load vector stores from database on startup"""
+    try:
+        from database import SessionLocal
+        db = SessionLocal()
+        try:
+            load_vector_stores_from_db(db)
+            print("Vector stores loaded from database on startup")
+        finally:
+            db.close()
+    except Exception as e:
+        print(f"Error loading vector stores on startup: {e}")
+
+# Call startup function
+startup_event()
 
 @app.post("/api/upload")
-async def upload_document(file: UploadFile = File(...)):
+async def upload_document(file: UploadFile = File(...), db: Session = Depends(get_db)):
     """Upload and process PDF document"""
     try:
         # Validate file type
         if not file.filename.endswith('.pdf'):
             raise HTTPException(status_code=400, detail="Only PDF files are supported")
+        
+        # Check if document already exists
+        existing_doc = db.query(Document).filter(Document.filename == file.filename).first()
+        if existing_doc:
+            # Load existing vector store
+            vector_store_record = db.query(VectorStore).filter(VectorStore.document_id == existing_doc.id).first()
+            if vector_store_record and os.path.exists(vector_store_record.vector_store_path):
+                vector_stores_cache[file.filename] = FAISS.load_local(
+                    vector_store_record.vector_store_path, 
+                    embeddings, 
+                    allow_dangerous_deserialization=True
+                )
+            
+            # Get existing persona
+            existing_persona = db.query(Persona).filter(Persona.document_id == existing_doc.id).first()
+            
+            return {
+                "success": True,
+                "document_id": existing_doc.id,
+                "filename": file.filename,
+                "persona_id": existing_persona.persona_id if existing_persona else None,
+                "message": "Document already exists and loaded successfully"
+            }
         
         # Generate unique ID and save file
         document_id = str(uuid.uuid4())
@@ -228,9 +341,8 @@ async def upload_document(file: UploadFile = File(...)):
         
         with open(file_path, "wb") as buffer:
             shutil.copyfileobj(file.file, buffer)
-        
-        # Process document and create vector store
-        vector_store, doc_list = process_document(file_path)
+          # Process document and create vector store
+        vector_store, doc_list, vector_db_path = process_document(file_path, document_id, db)
         
         # Extract text content for persona creation
         document_text = extract_text_from_documents(doc_list)
@@ -247,8 +359,7 @@ async def upload_document(file: UploadFile = File(...)):
         
         # Create Tavus persona with document context
         try:
-            persona_response = await create_tavus_persona(document_text, file.filename)
-            personas[file.filename] = persona_response
+            persona_response = await create_tavus_persona(document_text, file.filename, document_id, db)
             
             return {
                 "success": True,
@@ -271,26 +382,30 @@ async def upload_document(file: UploadFile = File(...)):
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to process document: {str(e)}")
 
-@app.post("/create-persona")
-async def create_persona_endpoint(request: PersonaRequest):
-    """Create a Tavus persona with document context"""
-    try:
-        persona_response = await create_tavus_persona(request.document_text, request.document_name)
-        return persona_response
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to create persona: {str(e)}")
-
 @app.post("/create-conversation")
-async def create_conversation_endpoint(request: ConversationRequest):
+async def create_conversation_endpoint(request: ConversationRequest, db: Session = Depends(get_db)):
     """Create a Tavus conversation with persona"""
     try:
-        conversation_response = await create_tavus_conversation(request.persona_id, request.document_name)
+        # Check if conversation already exists for this persona
+        existing_conversation = db.query(Conversation).filter(
+            Conversation.persona_id == request.persona_id,
+            Conversation.active == True
+        ).first()
+        
+        if existing_conversation:
+            return {
+                "conversation_id": existing_conversation.conversation_id,
+                "conversation_url": existing_conversation.conversation_url,
+                "message": "Using existing active conversation"
+            }
+        
+        conversation_response = await create_tavus_conversation(request.persona_id, request.document_name, db)
         return conversation_response
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to create conversation: {str(e)}")
 
 @app.post("/generate-speech")
-async def generate_speech(request: SpeechRequest):
+async def generate_speech(request: SpeechRequest, db: Session = Depends(get_db)):
     """Generate speech/video from text"""
     try:
         speech_data = {
@@ -349,7 +464,7 @@ async def get_speech_status(speech_id: str):
         raise HTTPException(status_code=500, detail=f"Failed to get speech status: {str(e)}")
 
 @app.post("/tavus-webhook")
-async def tavus_webhook(request: Request):
+async def tavus_webhook(request: Request, db: Session = Depends(get_db)):
     """Handle Tavus webhook events"""
     try:
         event = await request.json()
@@ -357,16 +472,36 @@ async def tavus_webhook(request: Request):
         print(f"Tavus webhook received: {event.get('type')} - {event.get('conversation_id')}")
         
         event_type = event.get("type")
+        conversation_id = event.get("conversation_id")
         
         if event_type == "conversation.started":
-            print(f"Conversation started: {event.get('conversation_id')}")
+            print(f"Conversation started: {conversation_id}")
             
         elif event_type == "conversation.ended":
-            print(f"Conversation ended: {event.get('conversation_id')}")
+            print(f"Conversation ended: {conversation_id}")
+            # Mark conversation as ended in database
+            conversation = db.query(Conversation).filter(
+                Conversation.conversation_id == conversation_id
+            ).first()
+            if conversation:
+                conversation.ended_date = datetime.utcnow()
+                conversation.active = False
+                db.commit()
             
         elif event_type == "utterance":
-            print(f"User utterance: {event.get('utterance')}")
-            # Handle user speech input here
+            utterance = event.get('utterance')
+            print(f"User utterance: {utterance}")
+            
+            # Save user message to database
+            if conversation_id and utterance:
+                chat_message = ChatMessage(
+                    document_name="video_chat",
+                    role="user",
+                    content=utterance,
+                    conversation_id=conversation_id
+                )
+                db.add(chat_message)
+                db.commit()
             
         elif event_type == "tool_call":
             tool_name = event.get("tool_name")
@@ -375,13 +510,11 @@ async def tavus_webhook(request: Request):
             if tool_name == "lookup_doc":
                 # Handle document lookup
                 query = event.get("parameters", {}).get("query", "")
-                conversation_id = event.get("conversation_id")
                 
-                # Implement document search logic here
-                # You could use the vector store to find relevant content
+                # Find relevant document content using vector search
+                # This would need the conversation's associated document
                 result = f"Found information related to: {query}"
                 
-                # Return the result (this would typically be sent back to Tavus)
                 return {"result": result}
         
         return {"success": True}
@@ -390,31 +523,217 @@ async def tavus_webhook(request: Request):
         print(f"Webhook processing error: {e}")
         raise HTTPException(status_code=500, detail="Webhook processing failed")
 
-@app.post("/chat")
-async def chat_with_document(request: ChatRequest):
+@app.post("/api/chat")
+async def chat_with_document(request: ChatRequest, db: Session = Depends(get_db)):
     """Chat with AI about the document using vector search"""
     try:
-        if not request.document_name or request.document_name not in vector_stores:
-            raise HTTPException(status_code=400, detail="Document not found or not processed")
+        if not request.document_name:
+            raise HTTPException(status_code=400, detail="Document name is required")
+        
+        # Save user message to database
+        user_message = ChatMessage(
+            document_name=request.document_name,
+            role="user",
+            content=request.query
+        )
+        db.add(user_message)
+        
+        # Check if vector store is in cache
+        if request.document_name not in vector_stores_cache:
+            # Try to load from database
+            document = db.query(Document).filter(Document.filename == request.document_name).first()
+            if not document:
+                raise HTTPException(status_code=400, detail="Document not found")
+            
+            vector_store_record = db.query(VectorStore).filter(VectorStore.document_id == document.id).first()
+            if not vector_store_record or not os.path.exists(vector_store_record.vector_store_path):
+                raise HTTPException(status_code=400, detail="Vector store not found")
+            
+            # Load vector store
+            vector_stores_cache[request.document_name] = FAISS.load_local(
+                vector_store_record.vector_store_path, 
+                embeddings, 
+                allow_dangerous_deserialization=True
+            )
         
         # Get vector store for the document
-        vector_store = vector_stores[request.document_name]
+        vector_store = vector_stores_cache[request.document_name]
         
         # Search for relevant content
         relevant_docs = vector_store.similarity_search(request.query, k=3)
         context = "\n\n".join([doc.page_content for doc in relevant_docs])
         
         # Simple response generation (you could integrate with your LLM here)
-        response = f"Based on the document content, here's what I found relevant to your question '{request.query}':\n\n{context[:500]}..."
+        response_text = f"Based on the document content, here's what I found relevant to your question '{request.query}':\n\n{context[:500]}..."
         
-        return {"response": response}
+        # Save assistant message to database
+        assistant_message = ChatMessage(
+            document_name=request.document_name,
+            role="assistant",
+            content=response_text
+        )
+        db.add(assistant_message)
+        db.commit()
+        
+        return {"response": response_text}
     
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to process chat: {str(e)}")
 
+@app.post("/api/summarize")
+async def summarize_document(request: SummarizeRequest, db: Session = Depends(get_db)):
+    """Generate a summary of the document"""
+    try:
+        print(f"Summarize request for document: {request.document_name}")
+        
+        # Check if vector store exists in cache
+        if request.document_name not in vector_stores_cache:
+            # Try to load from database
+            document = db.query(Document).filter(Document.filename == request.document_name).first()
+            if not document:
+                raise HTTPException(status_code=400, detail="Document not found")
+            
+            vector_store_record = db.query(VectorStore).filter(VectorStore.document_id == document.id).first()
+            if not vector_store_record or not os.path.exists(vector_store_record.vector_store_path):
+                raise HTTPException(status_code=400, detail="Vector store not found")
+            
+            # Load vector store
+            vector_stores_cache[request.document_name] = FAISS.load_local(
+                vector_store_record.vector_store_path, 
+                embeddings, 
+                allow_dangerous_deserialization=True
+            )
+        
+        vector_store = vector_stores_cache[request.document_name]
+        
+        # Create retrieval QA chain
+        qa_chain = RetrievalQA.from_chain_type(
+            llm=llm,
+            chain_type="stuff",
+            retriever=vector_store.as_retriever(search_kwargs={"k": 5})
+        )
+        
+        # Generate summary
+        summary_query = "Please provide a comprehensive summary of this document, highlighting the key points, main topics, and important information."
+        summary_response = qa_chain.invoke(summary_query)
+        
+        # Extract text from response
+        summary_text = summary_response.get('result', summary_response) if isinstance(summary_response, dict) else str(summary_response)
+        
+        # Save messages to database
+        user_message = ChatMessage(
+            document_name=request.document_name,
+            role="user",
+            content="Can you summarize this document?"
+        )
+        db.add(user_message)
+        
+        assistant_message = ChatMessage(
+            document_name=request.document_name,
+            role="assistant",
+            content=summary_text
+        )
+        db.add(assistant_message)
+        db.commit()
+        
+        return {"summary": summary_text}
+    
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to summarize document: {str(e)}")
+
+@app.get("/api/chat-history/{document_name}")
+async def get_chat_history(document_name: str, db: Session = Depends(get_db)):
+    """Get chat history for a document"""
+    try:
+        messages = db.query(ChatMessage).filter(
+            ChatMessage.document_name == document_name
+        ).order_by(ChatMessage.timestamp).all()
+        
+        return {
+            "messages": [
+                {
+                    "role": msg.role,
+                    "content": msg.content,
+                    "timestamp": msg.timestamp.isoformat()
+                }
+                for msg in messages
+            ]
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to get chat history: {str(e)}")
+
+@app.get("/documents")
+async def get_documents(db: Session = Depends(get_db)):
+    """Get all uploaded documents"""
+    try:
+        documents = db.query(Document).order_by(Document.upload_date.desc()).all()
+        
+        return {
+            "documents": [
+                {
+                    "id": doc.id,
+                    "filename": doc.filename,
+                    "upload_date": doc.upload_date.isoformat(),
+                    "processed": doc.processed
+                }
+                for doc in documents
+            ]
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to get documents: {str(e)}")
+
+@app.get("/api/documents")
+async def list_documents(db: Session = Depends(get_db)):
+    """List all available documents and their vector stores"""
+    try:
+        # Get documents from database
+        documents_from_db = db.query(Document).all()
+        
+        # Get vector stores from memory cache
+        vector_stores_list = list(vector_stores_cache.keys())
+        
+        return {
+            "documents": [
+                {
+                    "id": doc.id,
+                    "filename": doc.filename,
+                    "file_path": doc.file_path,
+                    "uploaded_at": doc.uploaded_at.isoformat() if doc.uploaded_at else None,
+                    "has_vector_store": doc.filename in vector_stores_cache
+                }
+                for doc in documents_from_db
+            ],
+            "vector_stores_in_memory": vector_stores_list,
+            "total_documents": len(documents_from_db),
+            "total_vector_stores": len(vector_stores_cache)
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to list documents: {str(e)}")
+
+@app.get("/personas")
+async def get_personas(db: Session = Depends(get_db)):
+    """Get all created personas"""
+    try:
+        personas = db.query(Persona).filter(Persona.active == True).order_by(Persona.created_date.desc()).all()
+        
+        return {
+            "personas": [
+                {
+                    "id": persona.id,
+                    "persona_id": persona.persona_id,
+                    "document_name": persona.document_name,
+                    "persona_name": persona.persona_name,
+                    "created_date": persona.created_date.isoformat()
+                }
+                for persona in personas
+            ]
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to get personas: {str(e)}")
+
 @app.get("/")
 async def root():
-    return {"message": "Mira AI Tutor API is running"}
+    return {"message": "Mira AI Tutor API is running with database persistence"}
 
 if __name__ == "__main__":
     import uvicorn
