@@ -22,7 +22,9 @@ from jwt import PyJWKClient
 # Import database models and functions
 from database import (
     create_tables, get_db, Document, Persona, Conversation, 
-    ChatMessage, VectorStore, engine
+    ChatMessage, VectorStore, UserProfile, SpeechGeneration,
+    UserSession, UsageAnalytics, engine, create_or_update_user_profile,
+    log_user_activity
 )
 
 # Load environment variables
@@ -135,12 +137,14 @@ def load_vector_stores_from_db(db: Session):
                 # Get document info
                 doc = db.query(Document).filter(Document.id == vs.document_id).first()
                 if doc:
-                    vector_stores_cache[doc.filename] = vector_store
-                    print(f"Loaded vector store for: {doc.filename}")
+                    # Use user-specific cache key
+                    cache_key = f"{doc.user_id}_{doc.filename}"
+                    vector_stores_cache[cache_key] = vector_store
+                    print(f"Loaded vector store for: {doc.filename} (User: {doc.user_id})")
         except Exception as e:
             print(f"Failed to load vector store {vs.id}: {e}")
 
-def process_document(file_path: str, document_id: str, db: Session):
+def process_document(file_path: str, document_id: str, user_id: str, db: Session):
     """Process PDF document and create vector store"""
     # Load PDF document
     loader = PyPDFLoader(file_path)
@@ -162,12 +166,16 @@ def process_document(file_path: str, document_id: str, db: Session):
     
     # Save vector store info to database    
     db_vector_store = VectorStore(
-    id=str(uuid.uuid4()),
-    document_id=document_id,
-    vector_store_path=vector_store_path
+        id=str(uuid.uuid4()),
+        document_id=document_id,
+        vector_store_path=vector_store_path,
+        total_chunks=len(splits)
     )
     db.add(db_vector_store)
     db.commit()
+    
+    # Log activity
+    log_user_activity(db, user_id, "document_processed", document_id)
     
     return vector_store, doc_list, vector_store_path
 
@@ -178,7 +186,7 @@ def extract_text_from_documents(documents_list):
         text_content += doc.page_content + "\n\n"
     return text_content.strip()
 
-async def create_tavus_persona(document_text: str, document_name: str, document_id: str, db: Session) -> Dict[str, Any]:
+async def create_tavus_persona(document_text: str, document_name: str, document_id: str, user_id: str, db: Session) -> Dict[str, Any]:
     """Create a Tavus persona with document context"""
     
     if not TAVUS_API_KEY:
@@ -268,14 +276,17 @@ Always be helpful, patient, and encouraging in your responses. Keep your answers
             db_persona = Persona(
                 id=str(uuid.uuid4()),
                 document_id=document_id,
-                document_name=document_name,
                 persona_id=persona_response.get("persona_id"),
                 persona_name=persona_data["persona_name"],
                 system_prompt=persona_data["system_prompt"],
-                context=document_text
+                context=document_text,
+                tavus_replica_id=TAVUS_REPLICA_ID
             )
             db.add(db_persona)
             db.commit()
+            
+            # Log activity
+            log_user_activity(db, user_id, "persona_created", document_id)
             
             return persona_response
     except httpx.TimeoutException:
@@ -283,7 +294,7 @@ Always be helpful, patient, and encouraging in your responses. Keep your answers
     except httpx.RequestError as e:
         raise HTTPException(status_code=500, detail=f"Tavus API request failed: {str(e)}")
 
-async def create_tavus_conversation(persona_id: str, document_name: str, db: Session) -> Dict[str, Any]:
+async def create_tavus_conversation(persona_id: str, document_name: str, user_id: str, db: Session) -> Dict[str, Any]:
     """Create a Tavus conversation with persona"""
     
     if not TAVUS_API_KEY:
@@ -329,13 +340,17 @@ async def create_tavus_conversation(persona_id: str, document_name: str, db: Ses
             # Save conversation to database
             db_conversation = Conversation(
                 id=str(uuid.uuid4()),
+                user_id=user_id,
                 persona_id=persona_id,
                 conversation_id=conversation_response.get("conversation_id"),
                 conversation_url=conversation_response.get("conversation_url"),
-                document_name=document_name
+                conversation_name=conversation_data["conversation_name"]
             )
             db.add(db_conversation)
             db.commit()
+            
+            # Log activity
+            log_user_activity(db, user_id, "video_conversation_created")
             
             return conversation_response
     except httpx.TimeoutException:
@@ -370,6 +385,9 @@ async def upload_document(
     try:
         user_id = user_data.get("sub")  # Clerk user ID
         
+        # Create or update user profile
+        user_profile = create_or_update_user_profile(db, user_data)
+        
         # Validate file type
         if not file.filename or not file.filename.lower().endswith('.pdf'):
             raise HTTPException(status_code=400, detail="Only PDF files are supported")
@@ -396,7 +414,8 @@ async def upload_document(
             vector_store_record = db.query(VectorStore).filter(VectorStore.document_id == existing_doc.id).first()
             if vector_store_record and os.path.exists(vector_store_record.vector_store_path) and embeddings:
                 try:
-                    vector_stores_cache[file.filename] = FAISS.load_local(
+                    cache_key = f"{user_id}_{file.filename}"
+                    vector_stores_cache[cache_key] = FAISS.load_local(
                         vector_store_record.vector_store_path, 
                         embeddings, 
                         allow_dangerous_deserialization=True
@@ -406,6 +425,9 @@ async def upload_document(
             
             # Get existing persona
             existing_persona = db.query(Persona).filter(Persona.document_id == existing_doc.id).first()
+            
+            # Log activity
+            log_user_activity(db, user_id, "document_reloaded", existing_doc.id)
             
             return {
                 "success": True,
@@ -418,41 +440,53 @@ async def upload_document(
         # Generate unique ID and save file
         document_id = str(uuid.uuid4())
         file_path = f"uploads/{document_id}.pdf"
-          # Save file to disk
+        
+        # Save file to disk
         with open(file_path, "wb") as buffer:
             shutil.copyfileobj(file.file, buffer)
         
         # Save document to database with user_id
         db_document = Document(
             id=document_id,
-            filename=file.filename,
-            file_path=file_path,
             user_id=user_id,  # Associate with user
+            filename=file.filename,
+            original_filename=file.filename,
+            file_path=file_path,
+            file_size=file_size,
+            content_type=file.content_type,
+            processing_status="processing",
             processed=False
         )
         db.add(db_document)
         db.commit()
         
+        # Log activity
+        log_user_activity(db, user_id, "document_uploaded", document_id)
+        
         # Process document and create vector store
-        vector_store, doc_list, vector_db_path = process_document(file_path, document_id, db)
+        vector_store, doc_list, vector_db_path = process_document(file_path, document_id, user_id, db)
         
-        # Update document as processed
-        db_document.processed = True
-        db.commit()
-        
-        # Add to cache
-        vector_stores_cache[file.filename] = vector_store
-        
-        # Extract text content for persona creation
+        # Extract text content
         document_text = extract_text_from_documents(doc_list)
         
-        # Store document info and vector store
+        # Update document with text content and mark as processed
+        db_document.text_content = document_text
+        db_document.processed = True
+        db_document.processing_status = "completed"
+        db.commit()
+        
+        # Add to cache with user-specific key
+        cache_key = f"{user_id}_{file.filename}"
+        vector_stores_cache[cache_key] = vector_store
+        
+        # Store document info and vector store (legacy compatibility)
         documents[file.filename] = {
             "id": document_id,
             "path": file_path,
             "vector_db_path": vector_db_path,
             "type": file.content_type,
-            "text": document_text
+            "text": document_text,
+            "user_id": user_id
         }
         vector_stores[file.filename] = vector_store
         
@@ -460,7 +494,7 @@ async def upload_document(
         persona_id = None
         try:
             if TAVUS_API_KEY:
-                persona_response = await create_tavus_persona(document_text, file.filename, document_id, db)
+                persona_response = await create_tavus_persona(document_text, file.filename, document_id, user_id, db)
                 persona_id = persona_response.get("persona_id")
         except Exception as persona_error:
             print(f"Persona creation failed: {persona_error}")
@@ -471,6 +505,7 @@ async def upload_document(
             "document_id": document_id,
             "filename": file.filename,
             "persona_id": persona_id,
+            "file_size": file_size,
             "message": "Document processed and vectorized successfully" + 
                       (" with persona created" if persona_id else " (persona creation failed)")
         }
@@ -479,6 +514,13 @@ async def upload_document(
         raise
     except Exception as e:
         print(f"Upload error: {e}")
+        # Update document status to failed if it exists
+        if 'document_id' in locals():
+            db_document = db.query(Document).filter(Document.id == document_id).first()
+            if db_document:
+                db_document.processing_status = "failed"
+                db_document.error_message = str(e)
+                db.commit()
         raise HTTPException(status_code=500, detail=f"Failed to process document: {str(e)}")
 
 @app.post("/create-conversation")
@@ -489,10 +531,13 @@ async def create_conversation_endpoint(
 ):
     """Create a Tavus conversation with persona"""
     try:
-        # Check if conversation already exists for this persona
+        user_id = user_data.get("sub")
+        
+        # Check if conversation already exists for this persona and user
         existing_conversation = db.query(Conversation).filter(
             Conversation.persona_id == request.persona_id,
-            Conversation.active == True
+            Conversation.user_id == user_id,
+            Conversation.status == "active"
         ).first()
         
         if existing_conversation:
@@ -502,7 +547,7 @@ async def create_conversation_endpoint(
                 "message": "Using existing active conversation"
             }
         
-        conversation_response = await create_tavus_conversation(request.persona_id, request.document_name, db)
+        conversation_response = await create_tavus_conversation(request.persona_id, request.document_name, user_id, db)
         return conversation_response
     except HTTPException:
         raise
@@ -518,6 +563,8 @@ async def generate_speech(
 ):
     """Generate speech/video from text"""
     try:
+        user_id = user_data.get("sub")
+        
         if not TAVUS_API_KEY:
             raise HTTPException(status_code=500, detail="Tavus API key not configured")
         
@@ -544,7 +591,28 @@ async def generate_speech(
                     detail=f"Failed to generate speech: {response.text}"
                 )
             
-            return response.json()
+            speech_response = response.json()
+            
+            # Save speech generation to database
+            conversation = db.query(Conversation).filter(
+                Conversation.conversation_id == request.conversation_id
+            ).first()
+            
+            if conversation:
+                speech_generation = SpeechGeneration(
+                    id=str(uuid.uuid4()),
+                    conversation_id=conversation.id,
+                    speech_id=speech_response.get("speech_id"),
+                    input_text=request.text,
+                    status="pending"
+                )
+                db.add(speech_generation)
+                db.commit()
+                
+                # Log activity
+                log_user_activity(db, user_id, "speech_generated")
+            
+            return speech_response
     
     except HTTPException:
         raise
@@ -555,7 +623,8 @@ async def generate_speech(
 @app.get("/speech-status/{speech_id}")
 async def get_speech_status(
     speech_id: str,
-    user_data: dict = Depends(verify_clerk_token)
+    user_data: dict = Depends(verify_clerk_token),
+    db: Session = Depends(get_db)
 ):
     """Get speech generation status"""
     try:
@@ -578,7 +647,27 @@ async def get_speech_status(
                     detail=f"Failed to get speech status: {response.text}"
                 )
             
-            return response.json()
+            speech_status = response.json()
+            
+            # Update speech generation status in database
+            speech_generation = db.query(SpeechGeneration).filter(
+                SpeechGeneration.speech_id == speech_id
+            ).first()
+            
+            if speech_generation:
+                speech_generation.status = speech_status.get("status", "unknown")
+                speech_generation.video_url = speech_status.get("video_url")
+                speech_generation.audio_url = speech_status.get("audio_url")
+                speech_generation.duration_seconds = speech_status.get("duration_seconds")
+                
+                if speech_status.get("status") == "completed":
+                    speech_generation.completed_date = datetime.utcnow()
+                elif speech_status.get("status") == "failed":
+                    speech_generation.error_message = speech_status.get("error_message")
+                
+                db.commit()
+            
+            return speech_status
     
     except HTTPException:
         raise
@@ -599,6 +688,17 @@ async def tavus_webhook(request: Request, db: Session = Depends(get_db)):
         
         if event_type == "conversation.started":
             print(f"Conversation started: {conversation_id}")
+            # Update conversation status
+            conversation = db.query(Conversation).filter(
+                Conversation.conversation_id == conversation_id
+            ).first()
+            if conversation:
+                conversation.started_date = datetime.utcnow()
+                conversation.status = "active"
+                db.commit()
+                
+                # Log activity
+                log_user_activity(db, conversation.user_id, "video_conversation_started")
             
         elif event_type == "conversation.ended":
             print(f"Conversation ended: {conversation_id}")
@@ -608,8 +708,17 @@ async def tavus_webhook(request: Request, db: Session = Depends(get_db)):
             ).first()
             if conversation:
                 conversation.ended_date = datetime.utcnow()
-                conversation.active = False
+                conversation.status = "ended"
+                
+                # Calculate duration if started
+                if conversation.started_date:
+                    duration = (datetime.utcnow() - conversation.started_date).total_seconds()
+                    conversation.duration_seconds = int(duration)
+                
                 db.commit()
+                
+                # Log activity
+                log_user_activity(db, conversation.user_id, "video_conversation_ended")
             
         elif event_type == "utterance":
             utterance = event.get('utterance')
@@ -617,19 +726,25 @@ async def tavus_webhook(request: Request, db: Session = Depends(get_db)):
             
             # Save user message to database
             if conversation_id and utterance:
-                # Find the conversation to get document name
-                conversation = db.query(Conversation).filter(
+                # Find the conversation to get user and document info
+                conversation = db.query(Conversation).join(Persona).join(Document).filter(
                     Conversation.conversation_id == conversation_id
                 ).first()
                 
-                chat_message = ChatMessage(
-                    document_name=conversation.document_name if conversation else "video_chat",
-                    role="user",
-                    content=utterance,
-                    conversation_id=conversation_id
-                )
-                db.add(chat_message)
-                db.commit()
+                if conversation:
+                    chat_message = ChatMessage(
+                        user_id=conversation.user_id,
+                        document_id=conversation.persona.document_id,
+                        conversation_id=conversation_id,
+                        role="user",
+                        content=utterance,
+                        message_type="voice"
+                    )
+                    db.add(chat_message)
+                    db.commit()
+                    
+                    # Log activity
+                    log_user_activity(db, conversation.user_id, "voice_message_sent")
             
         elif event_type == "tool_call":
             tool_name = event.get("tool_name")
@@ -661,6 +776,9 @@ async def chat_with_document(
     try:
         user_id = user_data.get("sub")
         
+        # Create or update user profile
+        user_profile = create_or_update_user_profile(db, user_data)
+        
         if not request.document_name:
             raise HTTPException(status_code=400, detail="Document name is required")
         
@@ -679,40 +797,48 @@ async def chat_with_document(
         if len(request.query) > 2000:
             raise HTTPException(status_code=400, detail="Query too long (max 2000 characters)")
         
+        # Get document for this user
+        document = db.query(Document).filter(
+            Document.filename == request.document_name,
+            Document.user_id == user_id
+        ).first()
+        
+        if not document:
+            raise HTTPException(status_code=400, detail="Document not found")
+        
         # Save user message to database with user_id
         user_message = ChatMessage(
-            document_name=request.document_name,
+            user_id=user_id,
+            document_id=document.id,
             role="user",
             content=request.query,
-            user_id=user_id
+            message_type="text"
         )
         db.add(user_message)
         
         # Check if vector store is in cache
-        if request.document_name not in vector_stores_cache:
+        cache_key = f"{user_id}_{request.document_name}"
+        if cache_key not in vector_stores_cache:
             # Try to load from database for this user
-            document = db.query(Document).filter(
-                Document.filename == request.document_name,
-                Document.user_id == user_id
-            ).first()
-            if not document:
-                raise HTTPException(status_code=400, detail="Document not found")
-            
             vector_store_record = db.query(VectorStore).filter(VectorStore.document_id == document.id).first()
             if not vector_store_record or not os.path.exists(vector_store_record.vector_store_path):
                 raise HTTPException(status_code=400, detail="Vector store not found")
             
             # Load vector store
             try:
-                vector_stores_cache[request.document_name] = FAISS.load_local(
+                vector_stores_cache[cache_key] = FAISS.load_local(
                     vector_store_record.vector_store_path, 
                     embeddings, 
                     allow_dangerous_deserialization=True
                 )
+                # Update last accessed
+                vector_store_record.last_accessed = datetime.utcnow()
+                db.commit()
             except Exception as e:
                 raise HTTPException(status_code=500, detail=f"Failed to load vector store: {str(e)}")
-          # Get vector store for the document
-        vector_store = vector_stores_cache[request.document_name]
+        
+        # Get vector store for the document
+        vector_store = vector_stores_cache[cache_key]
         
         # Create retrieval QA chain with LLM
         qa_chain = RetrievalQA.from_chain_type(
@@ -722,6 +848,7 @@ async def chat_with_document(
         )
         
         # Get AI response using the LLM
+        start_time = datetime.utcnow()
         try:
             ai_response = qa_chain.invoke(request.query)
             
@@ -734,15 +861,23 @@ async def chat_with_document(
             context = "\n\n".join([doc.page_content for doc in relevant_docs])
             response_text = f"Based on the document content, here's what I found relevant to your question '{request.query}':\n\n{context[:500]}..."
         
+        # Calculate response time
+        response_time = (datetime.utcnow() - start_time).total_seconds() * 1000
+        
         # Save assistant message to database with user_id
         assistant_message = ChatMessage(
-            document_name=request.document_name,
+            user_id=user_id,
+            document_id=document.id,
             role="assistant",
             content=response_text,
-            user_id=user_id
+            message_type="text",
+            response_time_ms=int(response_time)
         )
         db.add(assistant_message)
         db.commit()
+        
+        # Log activity
+        log_user_activity(db, user_id, "chat_message_sent", document.id)
         
         return {"response": response_text}
     
@@ -764,28 +899,31 @@ async def summarize_document(
         
         print(f"Summarize request for document: {request.document_name}")
         
+        # Get document for this user
+        document = db.query(Document).filter(
+            Document.filename == request.document_name,
+            Document.user_id == user_id
+        ).first()
+        
+        if not document:
+            raise HTTPException(status_code=400, detail="Document not found")
+        
         # Check if vector store exists in cache
-        if request.document_name not in vector_stores_cache:
+        cache_key = f"{user_id}_{request.document_name}"
+        if cache_key not in vector_stores_cache:
             # Try to load from database for this user
-            document = db.query(Document).filter(
-                Document.filename == request.document_name,
-                Document.user_id == user_id
-            ).first()
-            if not document:
-                raise HTTPException(status_code=400, detail="Document not found")
-            
             vector_store_record = db.query(VectorStore).filter(VectorStore.document_id == document.id).first()
             if not vector_store_record or not os.path.exists(vector_store_record.vector_store_path):
                 raise HTTPException(status_code=400, detail="Vector store not found")
             
             # Load vector store
-            vector_stores_cache[request.document_name] = FAISS.load_local(
+            vector_stores_cache[cache_key] = FAISS.load_local(
                 vector_store_record.vector_store_path, 
                 embeddings, 
                 allow_dangerous_deserialization=True
             )
         
-        vector_store = vector_stores_cache[request.document_name]
+        vector_store = vector_stores_cache[cache_key]
         
         # Create retrieval QA chain
         qa_chain = RetrievalQA.from_chain_type(
@@ -803,21 +941,26 @@ async def summarize_document(
         
         # Save messages to database with user_id
         user_message = ChatMessage(
-            document_name=request.document_name,
+            user_id=user_id,
+            document_id=document.id,
             role="user",
             content="Can you summarize this document?",
-            user_id=user_id
+            message_type="text"
         )
         db.add(user_message)
         
         assistant_message = ChatMessage(
-            document_name=request.document_name,
+            user_id=user_id,
+            document_id=document.id,
             role="assistant",
             content=summary_text,
-            user_id=user_id
+            message_type="text"
         )
         db.add(assistant_message)
         db.commit()
+        
+        # Log activity
+        log_user_activity(db, user_id, "document_summarized", document.id)
         
         return {"summary": summary_text}
     
@@ -834,8 +977,17 @@ async def get_chat_history(
     try:
         user_id = user_data.get("sub")
         
+        # Get document for this user
+        document = db.query(Document).filter(
+            Document.filename == document_name,
+            Document.user_id == user_id
+        ).first()
+        
+        if not document:
+            raise HTTPException(status_code=400, detail="Document not found")
+        
         messages = db.query(ChatMessage).filter(
-            ChatMessage.document_name == document_name,
+            ChatMessage.document_id == document.id,
             ChatMessage.user_id == user_id
         ).order_by(ChatMessage.timestamp).all()
         
@@ -844,7 +996,8 @@ async def get_chat_history(
                 {
                     "role": msg.role,
                     "content": msg.content,
-                    "timestamp": msg.timestamp.isoformat()
+                    "timestamp": msg.timestamp.isoformat(),
+                    "message_type": msg.message_type
                 }
                 for msg in messages
             ]
@@ -871,8 +1024,11 @@ async def get_documents(
                 {
                     "id": doc.id,
                     "filename": doc.filename,
+                    "original_filename": doc.original_filename,
+                    "file_size": doc.file_size,
                     "upload_date": doc.upload_date.isoformat(),
-                    "processed": doc.processed
+                    "processed": doc.processed,
+                    "processing_status": doc.processing_status
                 }
                 for doc in documents
             ]
@@ -895,23 +1051,27 @@ async def list_documents(
             Document.user_id == user_id
         ).all()
         
-        # Get vector stores from memory cache
-        vector_stores_list = list(vector_stores_cache.keys())
+        # Get vector stores from memory cache for this user
+        user_vector_stores = [key for key in vector_stores_cache.keys() if key.startswith(f"{user_id}_")]
         
         return {
             "documents": [
                 {
                     "id": doc.id,
                     "filename": doc.filename,
+                    "original_filename": doc.original_filename,
                     "file_path": doc.file_path,
+                    "file_size": doc.file_size,
                     "upload_date": doc.upload_date.isoformat() if doc.upload_date else None,
-                    "has_vector_store": doc.filename in vector_stores_cache
+                    "processed": doc.processed,
+                    "processing_status": doc.processing_status,
+                    "has_vector_store": f"{user_id}_{doc.filename}" in vector_stores_cache
                 }
                 for doc in documents_from_db
             ],
-            "vector_stores_in_memory": vector_stores_list,
+            "vector_stores_in_memory": len(user_vector_stores),
             "total_documents": len(documents_from_db),
-            "total_vector_stores": len(vector_stores_cache)
+            "total_vector_stores": len(user_vector_stores)
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to list documents: {str(e)}")
@@ -936,9 +1096,10 @@ async def get_personas(
                 {
                     "id": persona.id,
                     "persona_id": persona.persona_id,
-                    "document_name": persona.document_name,
+                    "document_name": persona.document.filename,
                     "persona_name": persona.persona_name,
-                    "created_date": persona.created_date.isoformat()
+                    "created_date": persona.created_date.isoformat(),
+                    "tavus_replica_id": persona.tavus_replica_id
                 }
                 for persona in personas
             ]
@@ -946,6 +1107,72 @@ async def get_personas(
     except Exception as e:
         print(f"Personas error: {e}")
         raise HTTPException(status_code=500, detail=f"Failed to get personas: {str(e)}")
+
+@app.get("/api/user-profile")
+async def get_user_profile(
+    db: Session = Depends(get_db),
+    user_data: dict = Depends(verify_clerk_token)
+):
+    """Get user profile information"""
+    try:
+        user_id = user_data.get("sub")
+        
+        # Create or update user profile
+        user_profile = create_or_update_user_profile(db, user_data)
+        
+        # Get user statistics
+        total_documents = db.query(Document).filter(Document.user_id == user_id).count()
+        total_messages = db.query(ChatMessage).filter(ChatMessage.user_id == user_id).count()
+        total_conversations = db.query(Conversation).filter(Conversation.user_id == user_id).count()
+        
+        return {
+            "user_profile": {
+                "id": user_profile.id,
+                "email": user_profile.email,
+                "first_name": user_profile.first_name,
+                "last_name": user_profile.last_name,
+                "profile_image_url": user_profile.profile_image_url,
+                "created_at": user_profile.created_at.isoformat(),
+                "last_login": user_profile.last_login.isoformat() if user_profile.last_login else None
+            },
+            "statistics": {
+                "total_documents": total_documents,
+                "total_messages": total_messages,
+                "total_conversations": total_conversations
+            }
+        }
+    except Exception as e:
+        print(f"User profile error: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to get user profile: {str(e)}")
+
+@app.get("/api/user-analytics")
+async def get_user_analytics(
+    db: Session = Depends(get_db),
+    user_data: dict = Depends(verify_clerk_token)
+):
+    """Get user activity analytics"""
+    try:
+        user_id = user_data.get("sub")
+        
+        # Get recent activity
+        recent_activity = db.query(UsageAnalytics).filter(
+            UsageAnalytics.user_id == user_id
+        ).order_by(UsageAnalytics.date.desc()).limit(50).all()
+        
+        return {
+            "recent_activity": [
+                {
+                    "action_type": activity.action_type,
+                    "date": activity.date.isoformat(),
+                    "document_id": activity.document_id,
+                    "metadata": activity.metadata
+                }
+                for activity in recent_activity
+            ]
+        }
+    except Exception as e:
+        print(f"User analytics error: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to get user analytics: {str(e)}")
 
 @app.get("/")
 async def root():
