@@ -12,8 +12,7 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Message } from "@/types/chat";
 import { cn } from "@/lib/utils";
 import { createConversationWithPersona } from "@/lib/tavus";
-import { useUser } from '@clerk/nextjs';
-import { redirect } from 'next/navigation';
+import { useUser, useAuth } from '@clerk/nextjs';
 
 // API base URL configuration
 const API_BASE_URL = process.env.NODE_ENV === 'production' 
@@ -22,6 +21,7 @@ const API_BASE_URL = process.env.NODE_ENV === 'production'
 
 export function TutorApp() {
   const { isLoaded, isSignedIn, user } = useUser();
+  const { getToken } = useAuth();
   const [activeDocument, setActiveDocument] = useState<string | null>(null);
   const [messages, setMessages] = useState<Message[]>([
     {
@@ -36,21 +36,6 @@ export function TutorApp() {
   const [currentPersonaId, setCurrentPersonaId] = useState<string | null>(null);
   const [documentText, setDocumentText] = useState<string>("");
   const [availableDocuments, setAvailableDocuments] = useState<any[]>([]);
-
-  // Show loading state while Clerk is loading
-  if (!isLoaded) {
-    return (
-      <div className="min-h-screen flex items-center justify-center">
-        <div className="animate-spin rounded-full h-32 w-32 border-b-2 border-primary"></div>
-      </div>
-    );
-  }
-
-  // This should not be needed due to middleware, but adding as extra security
-  if (!isSignedIn) {
-    redirect('/sign-up');
-    return null;
-  }
 
   // Load available documents and restore session on component mount
   useEffect(() => {
@@ -74,11 +59,32 @@ export function TutorApp() {
     }
   }, [currentPersonaId, user]);
 
+  // Show loading state while Clerk is loading
+  if (!isLoaded) {
+    return (
+      <div className="min-h-screen flex items-center justify-center">
+        <div className="animate-spin rounded-full h-32 w-32 border-b-2 border-primary"></div>
+      </div>
+    );
+  }
+
+  // If user is not signed in, show loading (middleware will handle redirect)
+  if (!isSignedIn) {
+    return (
+      <div className="min-h-screen flex items-center justify-center">
+        <div className="animate-spin rounded-full h-32 w-32 border-b-2 border-primary"></div>
+      </div>
+    );
+  }
+
   const loadAvailableDocuments = async () => {
     try {
+      const token = await getToken();
+      console.log('Token for documents:', token ? 'Token exists' : 'No token');
+      
       const response = await fetch(`${API_BASE_URL}/api/documents`, {
         headers: {
-          'Authorization': `Bearer ${await user?.getToken()}`,
+          'Authorization': `Bearer ${token}`,
         }
       });
       if (response.ok) {
@@ -87,7 +93,7 @@ export function TutorApp() {
         if (data && Array.isArray(data.documents)) {
           setAvailableDocuments(data.documents);
         } else {
-          console.warn('Documents API returned unexpected format:', data);
+          console.warn('Documents API returned unexpected format:', data)
           setAvailableDocuments([]);
         }
       } else {
@@ -113,7 +119,7 @@ export function TutorApp() {
       try {
         const response = await fetch(`${API_BASE_URL}/api/chat-history/${storedDocumentName}`, {
           headers: {
-            'Authorization': `Bearer ${await user.getToken()}`,
+            'Authorization': `Bearer ${await getToken()}`,
           }
         });
         if (response.ok) {
@@ -148,10 +154,13 @@ export function TutorApp() {
       const formData = new FormData();
       formData.append("file", file);
 
+      const token = await getToken();
+      console.log('Token for upload:', token ? 'Token exists' : 'No token');
+      
       const uploadResponse = await fetch(`${API_BASE_URL}/api/upload`, {
         method: "POST",
         headers: {
-          'Authorization': `Bearer ${await user.getToken()}`,
+          'Authorization': `Bearer ${token}`,
         },
         body: formData,
       });
@@ -218,10 +227,9 @@ export function TutorApp() {
     
     try {
       const response = await fetch(`${API_BASE_URL}/api/chat`, {
-        method: "POST",
-        headers: {
+        method: "POST",        headers: {
           "Content-Type": "application/json",
-          'Authorization': `Bearer ${await user.getToken()}`,
+          'Authorization': `Bearer ${await getToken()}`,
         },
         body: JSON.stringify({ 
           query: messageContent,
@@ -275,11 +283,10 @@ export function TutorApp() {
     try {
       setActiveDocument(document.filename);
       localStorage.setItem(`currentDocumentName_${user.id}`, document.filename);
-      
-      // Try to find existing persona for this document
+        // Try to find existing persona for this document
       const personasResponse = await fetch(`${API_BASE_URL}/personas`, {
         headers: {
-          'Authorization': `Bearer ${await user.getToken()}`,
+          'Authorization': `Bearer ${await getToken()}`,
         }
       });
       if (personasResponse.ok) {
@@ -292,11 +299,10 @@ export function TutorApp() {
           setCurrentPersonaId(documentPersona.persona_id);
           localStorage.setItem(`currentPersonaId_${user.id}`, documentPersona.persona_id);
         }
-      }
-        // Load chat history
+      }        // Load chat history
       const historyResponse = await fetch(`${API_BASE_URL}/api/chat-history/${document.filename}`, {
         headers: {
-          'Authorization': `Bearer ${await user.getToken()}`,
+          'Authorization': `Bearer ${await getToken()}`,
         }
       });
       if (historyResponse.ok) {

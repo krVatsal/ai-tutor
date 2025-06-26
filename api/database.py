@@ -171,7 +171,7 @@ class UsageAnalytics(Base):
     date = Column(DateTime, default=datetime.utcnow)
     action_type = Column(String)  # upload, chat, video_start, video_end, etc.
     document_id = Column(String, nullable=True)
-    metadata = Column(Text, nullable=True)  # JSON string for additional data
+    additional_data = Column(Text, nullable=True)  # JSON string for additional data
 
 # Create tables
 def create_tables():
@@ -221,13 +221,13 @@ def create_or_update_user_profile(db, user_data):
     return user_profile
 
 # Helper function to log user activity
-def log_user_activity(db, user_id, action_type, document_id=None, metadata=None):
+def log_user_activity(db, user_id, action_type, document_id=None, additional_data=None):
     """Log user activity for analytics"""
     activity = UsageAnalytics(
         user_id=user_id,
         action_type=action_type,
         document_id=document_id,
-        metadata=metadata
+        additional_data=additional_data
     )
     db.add(activity)
     db.commit()
