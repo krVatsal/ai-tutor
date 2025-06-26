@@ -184,7 +184,13 @@ export function TutorApp() {
           ...prev,
           {
             role: "assistant",
-            content: `Perfect, ${user.firstName || 'there'}! I've processed "${file.name}" and created a personalized learning experience for you. I'm now ready to discuss the document content through both text and video chat. What would you like to know about it?`,
+            content: `Perfect, ${user.firstName || 'there'}! I've processed "${file.name}" and created your personalized AI tutor experience. 
+
+✅ Document processed and vectorized
+✅ AI persona "Mira" created with document context
+✅ Video chat capability enabled
+
+I'm now ready to discuss the document content through both text and video chat. You can start a video conversation using the "Start Video Chat with Mira" button on the right. What would you like to know about the document?`,
           },
         ]);
       } else {
@@ -192,7 +198,12 @@ export function TutorApp() {
           ...prev,
           {
             role: "assistant",
-            content: `I've processed "${file.name}" successfully! While I couldn't set up the advanced video features, I'm ready to help you understand the document through our text chat. What would you like to know?`,
+            content: `I've processed "${file.name}" successfully! 
+
+✅ Document processed and vectorized
+⚠️ Video chat setup encountered an issue
+
+I'm ready to help you understand the document through our text chat. What would you like to know about it?`,
           },
         ]);
       }
@@ -283,10 +294,13 @@ export function TutorApp() {
     try {
       setActiveDocument(document.filename);
       localStorage.setItem(`currentDocumentName_${user.id}`, document.filename);
-        // Try to find existing persona for this document
-      const personasResponse = await fetch(`${API_BASE_URL}/personas`, {
+      
+      const token = await getToken();
+      
+      // Try to find existing persona for this document
+      const personasResponse = await fetch(`${API_BASE_URL}/api/personas`, {
         headers: {
-          'Authorization': `Bearer ${await getToken()}`,
+          'Authorization': `Bearer ${token}`,
         }
       });
       if (personasResponse.ok) {
@@ -302,7 +316,7 @@ export function TutorApp() {
       }        // Load chat history
       const historyResponse = await fetch(`${API_BASE_URL}/api/chat-history/${document.filename}`, {
         headers: {
-          'Authorization': `Bearer ${await getToken()}`,
+          'Authorization': `Bearer ${token}`,
         }
       });
       if (historyResponse.ok) {

@@ -125,7 +125,14 @@ vector_stores = {}
 TAVUS_API_URL = os.getenv("TAVUS_API_URL", "https://tavusapi.com/v2")
 TAVUS_API_KEY = os.getenv("TAVUS_API_KEY")
 TAVUS_REPLICA_ID = os.getenv("TAVUS_REPLICA_ID")
-TAVUS_VOICE_ID = os.getenv("TAVUS_VOICE_ID")
+
+
+# Debug Tavus configuration at startup
+print(f"TAVUS Configuration at startup:")
+print(f"  TAVUS_API_URL: {TAVUS_API_URL}")
+print(f"  TAVUS_API_KEY: {'*' * 10 if TAVUS_API_KEY else 'NOT SET'}")
+print(f"  TAVUS_REPLICA_ID: {TAVUS_REPLICA_ID}")
+print(f"  Tavus configured: {TAVUS_API_KEY is not None}")
 
 def load_vector_stores_from_db(db: Session):
     """Load vector stores from database on startup"""
@@ -215,7 +222,7 @@ def extract_text_from_documents(documents_list):
         text_content += doc.page_content + "\n\n"
     return text_content.strip()
 
-@app.post("/create_persona")
+@app.post("/api/create_persona")
 async def create_persona(
     ctx: DocContext,
     db: Session = Depends(get_db),
@@ -281,10 +288,7 @@ Always be helpful, patient, and encouraging in your responses. Keep your answers
                         }
                     ]
                 },
-                "tts": {
-                    "tts_engine": "cartesia",
-                    "voice_id": TAVUS_VOICE_ID or "default"
-                },
+
                 "perception": {
                     "perception_model": "raven-0"
                 }
@@ -347,7 +351,7 @@ Always be helpful, patient, and encouraging in your responses. Keep your answers
         print(f"Error creating persona: {e}")
         raise HTTPException(status_code=500, detail=f"Failed to create persona: {str(e)}")
 
-@app.post("/create_conversation")
+@app.post("/api/create_conversation")
 async def create_conversation(
     request: ConversationRequest,
     db: Session = Depends(get_db),
@@ -437,7 +441,7 @@ async def create_conversation(
         print(f"Error creating conversation: {e}")
         raise HTTPException(status_code=500, detail=f"Failed to create conversation: {str(e)}")
 
-@app.post("/webhook")
+@app.post("/api/webhook")
 async def tavus_webhook(request: Request, db: Session = Depends(get_db)):
     """Handle Tavus webhook events"""
     try:
@@ -569,43 +573,10 @@ Your role is to:
 - Provide explanations and clarifications
 - Break down complex concepts into simpler terms
 - Engage in educational discussions about the document
-- Use the lookup_doc tool when you need to find specific information
 
 Always be helpful, patient, and encouraging in your responses. Keep your answers concise but informative.""",
-        "pipeline_mode": "full",
         "context": document_text,
-        "default_replica_id": TAVUS_REPLICA_ID,
-        "layers": {
-            "llm": {
-                "model": "tavus-llama-3-8b-instruct",
-                "tools": [
-                    {
-                        "type": "function",
-                        "function": {
-                            "name": "lookup_doc",
-                            "description": "Search and retrieve specific information from the document",
-                            "parameters": {
-                                "type": "object",
-                                "properties": {
-                                    "query": {
-                                        "type": "string",
-                                        "description": "The search query to find relevant document content"
-                                    }
-                                },
-                                "required": ["query"]
-                            }
-                        }
-                    }
-                ]
-            },
-            "tts": {
-                "tts_engine": "cartesia",
-                "voice_id": TAVUS_VOICE_ID or "default"
-            },
-            "perception": {
-                "perception_model": "raven-0"
-            }
-        }
+        "default_replica_id": TAVUS_REPLICA_ID
     }
     
     headers = {
@@ -614,12 +585,19 @@ Always be helpful, patient, and encouraging in your responses. Keep your answers
     }
     
     try:
+        print(f"Making request to: {TAVUS_API_URL}/personas")
+        print(f"Headers: {headers}")
+        print(f"Persona data keys: {list(persona_data.keys())}")
+        
         async with httpx.AsyncClient(timeout=30.0) as client:
             response = await client.post(
                 f"{TAVUS_API_URL}/personas",
                 json=persona_data,
                 headers=headers
             )
+            
+            print(f"Tavus API response status: {response.status_code}")
+            print(f"Tavus API response body: {response.text}")
             
             if response.status_code != 200:
                 error_detail = f"Tavus API error: {response.status_code} - {response.text}"
@@ -679,6 +657,7 @@ async def upload_document(
     """Upload and process PDF document with Tavus persona creation"""
     try:
         user_id = user_data.get("sub")  # Clerk user ID
+        print(f"DEBUG: Starting upload for user: {user_id}, file: {file.filename}")
         
         # Create or update user profile
         user_profile = create_or_update_user_profile(db, user_data)
@@ -787,12 +766,27 @@ async def upload_document(
         
         # Create Tavus persona with document context
         persona_id = None
+        print(f"DEBUG: Starting persona creation section")
+        print(f"DEBUG: TAVUS_API_KEY value: {TAVUS_API_KEY}")
+        print(f"DEBUG: TAVUS_API_KEY type: {type(TAVUS_API_KEY)}")
+        print(f"DEBUG: TAVUS_API_KEY bool: {bool(TAVUS_API_KEY)}")
+        
         try:
             if TAVUS_API_KEY:
+                print(f"Creating Tavus persona for document: {file.filename}")
+                print(f"TAVUS_API_KEY exists: {bool(TAVUS_API_KEY)}")
+                print(f"TAVUS_REPLICA_ID: {TAVUS_REPLICA_ID}")
+                print(f"TAVUS_API_URL: {TAVUS_API_URL}")
+                
                 persona_response = await create_tavus_persona_with_document(document_text, file.filename, document_id, user_id, db)
                 persona_id = persona_response.get("persona_id")
+                print(f"Tavus persona created successfully: {persona_id}")
+            else:
+                print("Tavus API key not configured - skipping persona creation")
         except Exception as persona_error:
             print(f"Persona creation failed: {persona_error}")
+            import traceback
+            traceback.print_exc()
             # Continue without persona - document processing was successful
         
         return {
@@ -818,7 +812,7 @@ async def upload_document(
                 db.commit()
         raise HTTPException(status_code=500, detail=f"Failed to process document: {str(e)}")
 
-@app.post("/generate-speech")
+@app.post("/api/generate-speech")
 async def generate_speech(
     request: SpeechRequest, 
     db: Session = Depends(get_db),
@@ -883,7 +877,7 @@ async def generate_speech(
         print(f"Speech generation error: {e}")
         raise HTTPException(status_code=500, detail=f"Failed to generate speech: {str(e)}")
 
-@app.get("/speech-status/{speech_id}")
+@app.get("/api/speech-status/{speech_id}")
 async def get_speech_status(
     speech_id: str,
     user_data: dict = Depends(verify_clerk_token),
@@ -1248,7 +1242,7 @@ async def list_documents(
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to list documents: {str(e)}")
 
-@app.get("/personas")
+@app.get("/api/personas")
 async def get_personas(
     db: Session = Depends(get_db),
     user_data: dict = Depends(verify_clerk_token)

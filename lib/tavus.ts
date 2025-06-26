@@ -133,7 +133,7 @@ export async function createConversation() {
 // Enhanced function to create persona with authenticated request
 export async function createPersonaWithAuth(documentText: string, documentName: string, token: string) {
   try {
-    const response = await fetch(`${API_BASE_URL}/create_persona`, {
+    const response = await fetch(`${API_BASE_URL}/api/create_persona`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
@@ -159,7 +159,7 @@ export async function createPersonaWithAuth(documentText: string, documentName: 
 // Enhanced function to create conversation with authenticated request
 export async function createConversationWithAuth(personaId: string, documentName: string, token: string) {
   try {
-    const response = await fetch(`${API_BASE_URL}/create_conversation`, {
+    const response = await fetch(`${API_BASE_URL}/api/create_conversation`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',

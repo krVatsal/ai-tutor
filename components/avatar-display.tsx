@@ -152,6 +152,12 @@ export function AvatarDisplay({
                   ? "Ready for Video Chat" 
                   : "Upload Document First"}
             </Badge>
+            
+            {personaId && !videoSessionActive && (
+              <div className="text-xs text-muted-foreground">
+                AI persona ready with document context
+              </div>
+            )}
           </div>
           
           {videoSessionActive && (
