@@ -87,6 +87,22 @@ class ChatRequest(BaseModel):
 class SummarizeRequest(BaseModel):
     document_name: str
 
+class DocContext(BaseModel):
+    docs: List[str]
+    document_name: str
+
+class PersonaRequest(BaseModel):
+    document_text: str
+    document_name: str
+
+class ConversationRequest(BaseModel):
+    persona_id: str
+    document_name: str
+
+class SpeechRequest(BaseModel):
+    conversation_id: str
+    text: str
+
 # Create directories for storing uploads and vector DB
 os.makedirs("uploads", exist_ok=True)
 os.makedirs("vector_db", exist_ok=True)
@@ -110,19 +126,6 @@ TAVUS_API_URL = os.getenv("TAVUS_API_URL", "https://tavusapi.com/v2")
 TAVUS_API_KEY = os.getenv("TAVUS_API_KEY")
 TAVUS_REPLICA_ID = os.getenv("TAVUS_REPLICA_ID")
 TAVUS_VOICE_ID = os.getenv("TAVUS_VOICE_ID")
-
-# Pydantic models
-class PersonaRequest(BaseModel):
-    document_text: str
-    document_name: str
-
-class ConversationRequest(BaseModel):
-    persona_id: str
-    document_name: str
-
-class SpeechRequest(BaseModel):
-    conversation_id: str
-    text: str
 
 def load_vector_stores_from_db(db: Session):
     """Load vector stores from database on startup"""
@@ -148,6 +151,27 @@ def load_vector_stores_from_db(db: Session):
                     print(f"Loaded vector store for: {doc.filename} (User: {doc.user_id})")
         except Exception as e:
             print(f"Failed to load vector store {vs.id}: {e}")
+
+def extract_and_chunk_documents(file_path: str) -> List[str]:
+    """Extract text from PDF and chunk it for Tavus context"""
+    try:
+        # Load PDF document
+        loader = PyPDFLoader(file_path)
+        doc_list = loader.load()
+        
+        # Split text into chunks
+        text_splitter = RecursiveCharacterTextSplitter(
+            chunk_size=2000,  # Larger chunks for Tavus context
+            chunk_overlap=200,
+        )
+        splits = text_splitter.split_documents(doc_list)
+        
+        # Extract text content from chunks
+        chunks = [doc.page_content for doc in splits]
+        return chunks
+    except Exception as e:
+        print(f"Error extracting and chunking document: {e}")
+        return []
 
 def process_document(file_path: str, document_id: str, user_id: str, db: Session):
     """Process PDF document and create vector store"""
@@ -191,8 +215,338 @@ def extract_text_from_documents(documents_list):
         text_content += doc.page_content + "\n\n"
     return text_content.strip()
 
-async def create_tavus_persona(document_text: str, document_name: str, document_id: str, user_id: str, db: Session) -> Dict[str, Any]:
+@app.post("/create_persona")
+async def create_persona(
+    ctx: DocContext,
+    db: Session = Depends(get_db),
+    user_data: dict = Depends(verify_clerk_token)
+):
     """Create a Tavus persona with document context"""
+    try:
+        user_id = user_data.get("sub")
+        
+        if not TAVUS_API_KEY:
+            raise HTTPException(status_code=500, detail="Tavus API key not configured")
+        
+        # Extract and chunk documents
+        chunks = ctx.docs if ctx.docs else []
+        
+        # Combine all chunks into context (limit to Tavus context size)
+        full_context = "\n\n".join(chunks)
+        max_context_length = 8000  # Tavus context limit
+        
+        if len(full_context) > max_context_length:
+            full_context = full_context[:max_context_length] + "..."
+        
+        # Create persona payload
+        persona_payload = {
+            "persona_name": f"Mira - AI Tutor for {ctx.document_name}",
+            "system_prompt": f"""You are Mira, an expert AI tutor specializing in helping students understand documents. 
+
+You have access to the following document content:
+{full_context}
+
+Your role is to:
+- Help students understand the document content
+- Answer questions about the material  
+- Provide explanations and clarifications
+- Break down complex concepts into simpler terms
+- Engage in educational discussions about the document
+- Use the lookup_doc tool when you need to find specific information
+
+Always be helpful, patient, and encouraging in your responses. Keep your answers concise but informative.""",
+            "pipeline_mode": "full",
+            "context": full_context,
+            "default_replica_id": TAVUS_REPLICA_ID,
+            "layers": {
+                "llm": {
+                    "model": "tavus-llama-3-8b-instruct",
+                    "tools": [
+                        {
+                            "type": "function",
+                            "function": {
+                                "name": "lookup_doc",
+                                "description": "Search and retrieve specific information from the document",
+                                "parameters": {
+                                    "type": "object",
+                                    "properties": {
+                                        "query": {
+                                            "type": "string",
+                                            "description": "The search query to find relevant document content"
+                                        }
+                                    },
+                                    "required": ["query"]
+                                }
+                            }
+                        }
+                    ]
+                },
+                "tts": {
+                    "tts_engine": "cartesia",
+                    "voice_id": TAVUS_VOICE_ID or "default"
+                },
+                "perception": {
+                    "perception_model": "raven-0"
+                }
+            }
+        }
+        
+        headers = {
+            "Content-Type": "application/json",
+            "x-api-key": TAVUS_API_KEY
+        }
+        
+        # Make request to Tavus API
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            response = await client.post(
+                f"{TAVUS_API_URL}/personas",
+                json=persona_payload,
+                headers=headers
+            )
+            
+            if response.status_code != 200:
+                error_detail = f"Tavus API error: {response.status_code} - {response.text}"
+                print(error_detail)
+                raise HTTPException(
+                    status_code=response.status_code,
+                    detail=error_detail
+                )
+            
+            persona_response = response.json()
+            
+            # Find the document in database
+            document = db.query(Document).filter(
+                Document.filename == ctx.document_name,
+                Document.user_id == user_id
+            ).first()
+            
+            if document:
+                # Save persona to database
+                db_persona = Persona(
+                    id=str(uuid.uuid4()),
+                    document_id=document.id,
+                    persona_id=persona_response.get("persona_id"),
+                    persona_name=persona_payload["persona_name"],
+                    system_prompt=persona_payload["system_prompt"],
+                    context=full_context,
+                    tavus_replica_id=TAVUS_REPLICA_ID
+                )
+                db.add(db_persona)
+                db.commit()
+                
+                # Log activity
+                log_user_activity(db, user_id, "persona_created", document.id)
+            
+            return persona_response
+            
+    except httpx.TimeoutException:
+        raise HTTPException(status_code=408, detail="Tavus API request timed out")
+    except httpx.RequestError as e:
+        raise HTTPException(status_code=500, detail=f"Tavus API request failed: {str(e)}")
+    except Exception as e:
+        print(f"Error creating persona: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to create persona: {str(e)}")
+
+@app.post("/create_conversation")
+async def create_conversation(
+    request: ConversationRequest,
+    db: Session = Depends(get_db),
+    user_data: dict = Depends(verify_clerk_token)
+):
+    """Create a Tavus conversation with persona"""
+    try:
+        user_id = user_data.get("sub")
+        
+        if not TAVUS_API_KEY:
+            raise HTTPException(status_code=500, detail="Tavus API key not configured")
+        
+        # Check if conversation already exists for this persona and user
+        existing_conversation = db.query(Conversation).filter(
+            Conversation.persona_id == request.persona_id,
+            Conversation.user_id == user_id,
+            Conversation.status == "active"
+        ).first()
+        
+        if existing_conversation:
+            return {
+                "conversation_id": existing_conversation.conversation_id,
+                "conversation_url": existing_conversation.conversation_url,
+                "message": "Using existing active conversation"
+            }
+        
+        # Create conversation payload
+        conversation_payload = {
+            "replica_id": TAVUS_REPLICA_ID,
+            "persona_id": request.persona_id,
+            "conversation_name": f"Document Discussion: {request.document_name}",
+            "conversational_context": f"The user has uploaded a document titled '{request.document_name}' and wants to discuss it. Help them understand the content, answer questions, and provide educational guidance about the material.",
+            "callback_url": f"{os.getenv('APP_URL', 'http://localhost:3000')}/api/tavus-webhook",
+            "properties": {
+                "max_call_duration": 3600,  # 1 hour
+                "participant_left_timeout": 60,
+                "language": "english",
+                "enable_recording": False
+            }
+        }
+        
+        headers = {
+            "Content-Type": "application/json",
+            "x-api-key": TAVUS_API_KEY
+        }
+        
+        # Make request to Tavus API
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            response = await client.post(
+                f"{TAVUS_API_URL}/conversations",
+                json=conversation_payload,
+                headers=headers
+            )
+            
+            if response.status_code != 200:
+                error_detail = f"Tavus API error: {response.status_code} - {response.text}"
+                print(error_detail)
+                raise HTTPException(
+                    status_code=response.status_code,
+                    detail=error_detail
+                )
+            
+            conversation_response = response.json()
+            
+            # Save conversation to database
+            db_conversation = Conversation(
+                id=str(uuid.uuid4()),
+                user_id=user_id,
+                persona_id=request.persona_id,
+                conversation_id=conversation_response.get("conversation_id"),
+                conversation_url=conversation_response.get("conversation_url"),
+                conversation_name=conversation_payload["conversation_name"]
+            )
+            db.add(db_conversation)
+            db.commit()
+            
+            # Log activity
+            log_user_activity(db, user_id, "video_conversation_created")
+            
+            return conversation_response
+            
+    except httpx.TimeoutException:
+        raise HTTPException(status_code=408, detail="Tavus API request timed out")
+    except httpx.RequestError as e:
+        raise HTTPException(status_code=500, detail=f"Tavus API request failed: {str(e)}")
+    except Exception as e:
+        print(f"Error creating conversation: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to create conversation: {str(e)}")
+
+@app.post("/webhook")
+async def tavus_webhook(request: Request, db: Session = Depends(get_db)):
+    """Handle Tavus webhook events"""
+    try:
+        event = await request.json()
+        
+        print(f"Tavus webhook received: {event.get('type')} - {event.get('conversation_id')}")
+        
+        event_type = event.get("type")
+        conversation_id = event.get("conversation_id")
+        
+        if event_type == "conversation.started":
+            print(f"Conversation started: {conversation_id}")
+            # Update conversation status
+            conversation = db.query(Conversation).filter(
+                Conversation.conversation_id == conversation_id
+            ).first()
+            if conversation:
+                conversation.started_date = datetime.utcnow()
+                conversation.status = "active"
+                db.commit()
+                
+                # Log activity
+                log_user_activity(db, conversation.user_id, "video_conversation_started")
+            
+        elif event_type == "conversation.ended":
+            print(f"Conversation ended: {conversation_id}")
+            # Mark conversation as ended in database
+            conversation = db.query(Conversation).filter(
+                Conversation.conversation_id == conversation_id
+            ).first()
+            if conversation:
+                conversation.ended_date = datetime.utcnow()
+                conversation.status = "ended"
+                
+                # Calculate duration if started
+                if conversation.started_date:
+                    duration = (datetime.utcnow() - conversation.started_date).total_seconds()
+                    conversation.duration_seconds = int(duration)
+                
+                db.commit()
+                
+                # Log activity
+                log_user_activity(db, conversation.user_id, "video_conversation_ended")
+            
+        elif event_type == "utterance":
+            utterance = event.get('utterance')
+            print(f"User utterance: {utterance}")
+            
+            # Save user message to database
+            if conversation_id and utterance:
+                # Find the conversation to get user and document info
+                conversation = db.query(Conversation).join(Persona).join(Document).filter(
+                    Conversation.conversation_id == conversation_id
+                ).first()
+                
+                if conversation:
+                    chat_message = ChatMessage(
+                        user_id=conversation.user_id,
+                        document_id=conversation.persona.document_id,
+                        conversation_id=conversation_id,
+                        role="user",
+                        content=utterance,
+                        message_type="voice"
+                    )
+                    db.add(chat_message)
+                    db.commit()
+                    
+                    # Log activity
+                    log_user_activity(db, conversation.user_id, "voice_message_sent")
+            
+        elif event_type == "tool_call":
+            tool_name = event.get("tool_name")
+            print(f"Tool call requested: {tool_name}")
+            
+            if tool_name == "lookup_doc":
+                # Handle document lookup using vector search
+                query = event.get("parameters", {}).get("query", "")
+                
+                # Find the conversation and associated document
+                conversation = db.query(Conversation).join(Persona).join(Document).filter(
+                    Conversation.conversation_id == conversation_id
+                ).first()
+                
+                if conversation and conversation.persona.document:
+                    # Use vector search to find relevant content
+                    cache_key = f"{conversation.user_id}_{conversation.persona.document.filename}"
+                    
+                    if cache_key in vector_stores_cache:
+                        vector_store = vector_stores_cache[cache_key]
+                        relevant_docs = vector_store.similarity_search(query, k=3)
+                        
+                        # Combine relevant content
+                        result_content = "\n\n".join([doc.page_content for doc in relevant_docs])
+                        result = f"Found relevant information about '{query}':\n\n{result_content[:1000]}..."
+                    else:
+                        result = f"Document lookup for '{query}' - vector store not available"
+                else:
+                    result = f"Document lookup for '{query}' - document not found"
+                
+                return {"result": result}
+        
+        return {"success": True}
+    
+    except Exception as e:
+        print(f"Webhook processing error: {e}")
+        return {"success": False, "error": str(e)}
+
+async def create_tavus_persona_with_document(document_text: str, document_name: str, document_id: str, user_id: str, db: Session) -> Dict[str, Any]:
+    """Create a Tavus persona with document context - integrated version"""
     
     if not TAVUS_API_KEY:
         raise HTTPException(status_code=500, detail="Tavus API key not configured")
@@ -299,70 +653,6 @@ Always be helpful, patient, and encouraging in your responses. Keep your answers
     except httpx.RequestError as e:
         raise HTTPException(status_code=500, detail=f"Tavus API request failed: {str(e)}")
 
-async def create_tavus_conversation(persona_id: str, document_name: str, user_id: str, db: Session) -> Dict[str, Any]:
-    """Create a Tavus conversation with persona"""
-    
-    if not TAVUS_API_KEY:
-        raise HTTPException(status_code=500, detail="Tavus API key not configured")
-    
-    conversation_data = {
-        "replica_id": TAVUS_REPLICA_ID,
-        "persona_id": persona_id,
-        "conversation_name": f"Document Discussion: {document_name}",
-        "conversational_context": f"The user has uploaded a document titled '{document_name}' and wants to discuss it. Help them understand the content, answer questions, and provide educational guidance about the material.",
-        "callback_url": f"{os.getenv('APP_URL', 'http://localhost:3000')}/api/tavusWebhook",
-        "properties": {
-            "max_call_duration": 300,  # 5 minutes
-            "participant_left_timeout": 60,
-            "language": "english",
-            "enable_recording": False
-        }
-    }
-    
-    headers = {
-        "Content-Type": "application/json",
-        "x-api-key": TAVUS_API_KEY
-    }
-    
-    try:
-        async with httpx.AsyncClient(timeout=30.0) as client:
-            response = await client.post(
-                f"{TAVUS_API_URL}/conversations",
-                json=conversation_data,
-                headers=headers
-            )
-            
-            if response.status_code != 200:
-                error_detail = f"Tavus API error: {response.status_code} - {response.text}"
-                print(error_detail)
-                raise HTTPException(
-                    status_code=response.status_code,
-                    detail=error_detail
-                )
-            
-            conversation_response = response.json()
-            
-            # Save conversation to database
-            db_conversation = Conversation(
-                id=str(uuid.uuid4()),
-                user_id=user_id,
-                persona_id=persona_id,
-                conversation_id=conversation_response.get("conversation_id"),
-                conversation_url=conversation_response.get("conversation_url"),
-                conversation_name=conversation_data["conversation_name"]
-            )
-            db.add(db_conversation)
-            db.commit()
-            
-            # Log activity
-            log_user_activity(db, user_id, "video_conversation_created")
-            
-            return conversation_response
-    except httpx.TimeoutException:
-        raise HTTPException(status_code=408, detail="Tavus API request timed out")
-    except httpx.RequestError as e:
-        raise HTTPException(status_code=500, detail=f"Tavus API request failed: {str(e)}")
-
 # Load existing vector stores on startup
 def startup_event():
     """Load vector stores from database on startup"""
@@ -386,7 +676,7 @@ async def upload_document(
     db: Session = Depends(get_db),
     user_data: dict = Depends(verify_clerk_token)
 ):
-    """Upload and process PDF document"""
+    """Upload and process PDF document with Tavus persona creation"""
     try:
         user_id = user_data.get("sub")  # Clerk user ID
         
@@ -499,7 +789,7 @@ async def upload_document(
         persona_id = None
         try:
             if TAVUS_API_KEY:
-                persona_response = await create_tavus_persona(document_text, file.filename, document_id, user_id, db)
+                persona_response = await create_tavus_persona_with_document(document_text, file.filename, document_id, user_id, db)
                 persona_id = persona_response.get("persona_id")
         except Exception as persona_error:
             print(f"Persona creation failed: {persona_error}")
@@ -512,7 +802,7 @@ async def upload_document(
             "persona_id": persona_id,
             "file_size": file_size,
             "message": "Document processed and vectorized successfully" + 
-                      (" with persona created" if persona_id else " (persona creation failed)")
+                      (" with Tavus persona created" if persona_id else " (persona creation failed)")
         }
     
     except HTTPException:
@@ -527,38 +817,6 @@ async def upload_document(
                 db_document.error_message = str(e)
                 db.commit()
         raise HTTPException(status_code=500, detail=f"Failed to process document: {str(e)}")
-
-@app.post("/create-conversation")
-async def create_conversation_endpoint(
-    request: ConversationRequest, 
-    db: Session = Depends(get_db),
-    user_data: dict = Depends(verify_clerk_token)
-):
-    """Create a Tavus conversation with persona"""
-    try:
-        user_id = user_data.get("sub")
-        
-        # Check if conversation already exists for this persona and user
-        existing_conversation = db.query(Conversation).filter(
-            Conversation.persona_id == request.persona_id,
-            Conversation.user_id == user_id,
-            Conversation.status == "active"
-        ).first()
-        
-        if existing_conversation:
-            return {
-                "conversation_id": existing_conversation.conversation_id,
-                "conversation_url": existing_conversation.conversation_url,
-                "message": "Using existing active conversation"
-            }
-        
-        conversation_response = await create_tavus_conversation(request.persona_id, request.document_name, user_id, db)
-        return conversation_response
-    except HTTPException:
-        raise
-    except Exception as e:
-        print(f"Conversation creation error: {e}")
-        raise HTTPException(status_code=500, detail=f"Failed to create conversation: {str(e)}")
 
 @app.post("/generate-speech")
 async def generate_speech(
@@ -679,97 +937,6 @@ async def get_speech_status(
     except Exception as e:
         print(f"Speech status error: {e}")
         raise HTTPException(status_code=500, detail=f"Failed to get speech status: {str(e)}")
-
-@app.post("/tavus-webhook")
-async def tavus_webhook(request: Request, db: Session = Depends(get_db)):
-    """Handle Tavus webhook events"""
-    try:
-        event = await request.json()
-        
-        print(f"Tavus webhook received: {event.get('type')} - {event.get('conversation_id')}")
-        
-        event_type = event.get("type")
-        conversation_id = event.get("conversation_id")
-        
-        if event_type == "conversation.started":
-            print(f"Conversation started: {conversation_id}")
-            # Update conversation status
-            conversation = db.query(Conversation).filter(
-                Conversation.conversation_id == conversation_id
-            ).first()
-            if conversation:
-                conversation.started_date = datetime.utcnow()
-                conversation.status = "active"
-                db.commit()
-                
-                # Log activity
-                log_user_activity(db, conversation.user_id, "video_conversation_started")
-            
-        elif event_type == "conversation.ended":
-            print(f"Conversation ended: {conversation_id}")
-            # Mark conversation as ended in database
-            conversation = db.query(Conversation).filter(
-                Conversation.conversation_id == conversation_id
-            ).first()
-            if conversation:
-                conversation.ended_date = datetime.utcnow()
-                conversation.status = "ended"
-                
-                # Calculate duration if started
-                if conversation.started_date:
-                    duration = (datetime.utcnow() - conversation.started_date).total_seconds()
-                    conversation.duration_seconds = int(duration)
-                
-                db.commit()
-                
-                # Log activity
-                log_user_activity(db, conversation.user_id, "video_conversation_ended")
-            
-        elif event_type == "utterance":
-            utterance = event.get('utterance')
-            print(f"User utterance: {utterance}")
-            
-            # Save user message to database
-            if conversation_id and utterance:
-                # Find the conversation to get user and document info
-                conversation = db.query(Conversation).join(Persona).join(Document).filter(
-                    Conversation.conversation_id == conversation_id
-                ).first()
-                
-                if conversation:
-                    chat_message = ChatMessage(
-                        user_id=conversation.user_id,
-                        document_id=conversation.persona.document_id,
-                        conversation_id=conversation_id,
-                        role="user",
-                        content=utterance,
-                        message_type="voice"
-                    )
-                    db.add(chat_message)
-                    db.commit()
-                    
-                    # Log activity
-                    log_user_activity(db, conversation.user_id, "voice_message_sent")
-            
-        elif event_type == "tool_call":
-            tool_name = event.get("tool_name")
-            print(f"Tool call requested: {tool_name}")
-            
-            if tool_name == "lookup_doc":
-                # Handle document lookup
-                query = event.get("parameters", {}).get("query", "")
-                
-                # Find relevant document content using vector search
-                # This would need the conversation's associated document
-                result = f"Found information related to: {query}"
-                
-                return {"result": result}
-        
-        return {"success": True}
-    
-    except Exception as e:
-        print(f"Webhook processing error: {e}")
-        return {"success": False, "error": str(e)}
 
 @app.post("/api/chat")
 async def chat_with_document(
@@ -1180,7 +1347,7 @@ async def get_user_analytics(
 
 @app.get("/")
 async def root():
-    return {"message": "Mira AI Tutor API is running with database persistence and Clerk authentication"}
+    return {"message": "Mira AI Tutor API is running with Tavus integration and Clerk authentication"}
 
 @app.get("/health")
 async def health_check():

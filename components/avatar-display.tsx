@@ -7,7 +7,8 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Progress } from "@/components/ui/progress";
 import { Badge } from "@/components/ui/badge";
 import { cn } from "@/lib/utils";
-import { createConversationWithPersona } from "@/lib/tavus";
+import { createConversationWithAuth } from "@/lib/tavus";
+import { useAuth } from '@clerk/nextjs';
 
 interface AvatarDisplayProps {
   isProcessing: boolean;
@@ -24,8 +25,9 @@ export function AvatarDisplay({
   personaId,
   documentName 
 }: AvatarDisplayProps) {
+  const { getToken } = useAuth();
   const [isGeneratingVideo, setIsGeneratingVideo] = useState(false);
-  const [timeRemaining, setTimeRemaining] = useState(300); // 5 minutes in seconds
+  const [timeRemaining, setTimeRemaining] = useState(3600); // 1 hour in seconds
   const [videoSessionActive, setVideoSessionActive] = useState(false);
   const [conversationUrl, setConversationUrl] = useState<string | null>(null);
   const [conversationId, setConversationId] = useState<string | null>(null);
@@ -52,8 +54,13 @@ export function AvatarDisplay({
   }, [videoSessionActive, timeRemaining]);
 
   const formatTime = (seconds: number) => {
-    const mins = Math.floor(seconds / 60);
+    const hours = Math.floor(seconds / 3600);
+    const mins = Math.floor((seconds % 3600) / 60);
     const secs = seconds % 60;
+    
+    if (hours > 0) {
+      return `${hours}:${mins.toString().padStart(2, '0')}:${secs.toString().padStart(2, '0')}`;
+    }
     return `${mins}:${secs.toString().padStart(2, '0')}`;
   };
 
@@ -66,14 +73,20 @@ export function AvatarDisplay({
     try {
       setIsGeneratingVideo(true);
       
+      // Get authentication token
+      const token = await getToken();
+      if (!token) {
+        throw new Error('Authentication token not available');
+      }
+      
       // Create conversation with the persona
-      const response = await createConversationWithPersona(personaId, documentName);
+      const response = await createConversationWithAuth(personaId, documentName, token);
       
       if (response.conversation_url && response.conversation_id) {
         setConversationUrl(response.conversation_url);
         setConversationId(response.conversation_id);
         setVideoSessionActive(true);
-        setTimeRemaining(300); // Reset to 5 minutes
+        setTimeRemaining(3600); // Reset to 1 hour
         
         // Store conversation details
         localStorage.setItem('currentConversationId', response.conversation_id);
@@ -153,7 +166,7 @@ export function AvatarDisplay({
         {videoSessionActive && (
           <div className="w-full space-y-2">
             <Progress 
-              value={(timeRemaining / 300) * 100} 
+              value={(timeRemaining / 3600) * 100} 
               className="h-2"
             />
             <p className="text-xs text-center text-muted-foreground">
@@ -184,7 +197,7 @@ export function AvatarDisplay({
               ) : (
                 <>
                   <Video className="mr-2 h-4 w-4" />
-                  Start Video Chat with Document
+                  Start Video Chat with Mira
                 </>
               )}
             </Button>
@@ -213,9 +226,9 @@ export function AvatarDisplay({
               <div className="flex items-start gap-2">
                 <Clock className="h-4 w-4 mt-0.5 text-muted-foreground shrink-0" />
                 <div>
-                  <p className="font-medium">5-minute video sessions</p>
+                  <p className="font-medium">1-hour video sessions</p>
                   <p className="text-muted-foreground text-xs">
-                    Each video chat session lasts up to 5 minutes
+                    Each video chat session lasts up to 1 hour
                   </p>
                 </div>
               </div>
@@ -236,7 +249,7 @@ export function AvatarDisplay({
                   <div>
                     <p className="font-medium">Document-aware AI</p>
                     <p className="text-muted-foreground text-xs">
-                      Mira has been trained on your specific document
+                      Mira has been trained on your specific document content
                     </p>
                   </div>
                 </div>
