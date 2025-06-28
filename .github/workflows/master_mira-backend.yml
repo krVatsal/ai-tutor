@@ -1,7 +1,3 @@
-# Docs for the Azure Web Apps Deploy action: https://github.com/Azure/webapps-deploy
-# More GitHub Actions for Azure: https://github.com/Azure/actions
-# More info on Python, GitHub Actions, and Azure App Service: https://aka.ms/python-webapps-actions
-
 name: Build and deploy Python app to Azure Web App - mira-backend
 
 on:
@@ -14,7 +10,7 @@ jobs:
   build:
     runs-on: ubuntu-latest
     permissions:
-      contents: read #This is required for actions/checkout
+      contents: read
 
     steps:
       - uses: actions/checkout@v4
@@ -28,14 +24,14 @@ jobs:
         run: |
           python -m venv venv
           source venv/bin/activate
-      
-      - name: Install dependencies
-        run: pip install -r requirements.txt
-        
-      # Optional: Add step to run tests here (PyTest, Django test suites, etc.)
 
-      - name: Zip artifact for deployment
-        run: zip release.zip ./* -r
+      - name: Install dependencies
+        run: pip install -r api/requirements.txt
+        
+      # Optional: Run tests here
+
+      - name: Zip artifact for deployment (only api/)
+        run: zip -r release.zip api
 
       - name: Upload artifact for deployment jobs
         uses: actions/upload-artifact@v4
@@ -43,14 +39,13 @@ jobs:
           name: python-app
           path: |
             release.zip
-            !venv/
 
   deploy:
     runs-on: ubuntu-latest
     needs: build
     permissions:
-      id-token: write #This is required for requesting the JWT
-      contents: read #This is required for actions/checkout
+      id-token: write
+      contents: read
 
     steps:
       - name: Download artifact from build job
@@ -61,7 +56,6 @@ jobs:
       - name: Unzip artifact for deployment
         run: unzip release.zip
 
-      
       - name: Login to Azure
         uses: azure/login@v2
         with:
@@ -69,10 +63,10 @@ jobs:
           tenant-id: ${{ secrets.AZUREAPPSERVICE_TENANTID_C6BAE1B8E65D4389A02F11AA3E115BBB }}
           subscription-id: ${{ secrets.AZUREAPPSERVICE_SUBSCRIPTIONID_858418EF476441AE867DEE2C03E79B2E }}
 
-      - name: 'Deploy to Azure Web App'
+      - name: Deploy to Azure Web App (from api/)
         uses: azure/webapps-deploy@v3
         id: deploy-to-webapp
         with:
           app-name: 'mira-backend'
           slot-name: 'Production'
-          
+          package: api
