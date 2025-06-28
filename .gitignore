@@ -4,7 +4,8 @@
 /node_modules
 /.pnp
 .pnp.js
-
+/venv
+venv
 # testing
 /coverage
 
@@ -17,6 +18,7 @@
 
 # misc
 .DS_Store
+/venv/
 *.pem
 
 # debug
