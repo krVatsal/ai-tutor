@@ -22,8 +22,8 @@ import jwt
 from database import (
     create_tables, get_db, Document, Persona, Conversation, 
     ChatMessage, VectorStore, UserProfile, SpeechGeneration,
-    UserSession, UsageAnalytics, engine, create_or_update_user_profile,
-    log_user_activity
+    UserSession, UsageAnalytics, VideoCallUsage, engine, create_or_update_user_profile,
+    log_user_activity, check_video_call_constraints, update_video_call_usage, get_video_call_usage_status
 )
 
 # Load environment variables
@@ -364,6 +364,11 @@ async def create_conversation(
         if not TAVUS_API_KEY:
             raise HTTPException(status_code=500, detail="Tavus API key not configured")
         
+        # Check video call constraints
+        can_start, message = check_video_call_constraints(db, user_id)
+        if not can_start:
+            raise HTTPException(status_code=429, detail=message)
+        
         # Check if conversation already exists for this persona and user
         existing_conversation = db.query(Conversation).filter(
             Conversation.persona_id == request.persona_id,
@@ -378,7 +383,7 @@ async def create_conversation(
                 "message": "Using existing active conversation"
             }
         
-        # Create conversation payload
+        # Create conversation payload with 20-minute limit
         conversation_payload = {
             "replica_id": TAVUS_REPLICA_ID,
             "persona_id": request.persona_id,
@@ -386,7 +391,7 @@ async def create_conversation(
             "conversational_context": f"The user has uploaded a document titled '{request.document_name}' and wants to discuss it. Help them understand the content, answer questions, and provide educational guidance about the material.",
             "callback_url": f"{os.getenv('APP_URL', 'http://localhost:3000')}/api/tavus-webhook",
             "properties": {
-                "max_call_duration": 3600,  # 1 hour
+                "max_call_duration": 1200,  # 20 minutes (1200 seconds)
                 "participant_left_timeout": 60,
                 "language": "english",
                 "enable_recording": False
@@ -427,6 +432,9 @@ async def create_conversation(
             )
             db.add(db_conversation)
             db.commit()
+            
+            # Update video call usage (increment call count)
+            update_video_call_usage(db, user_id)
             
             # Log activity
             log_user_activity(db, user_id, "video_conversation_created")
@@ -480,6 +488,9 @@ async def tavus_webhook(request: Request, db: Session = Depends(get_db)):
                 if conversation.started_date:
                     duration = (datetime.utcnow() - conversation.started_date).total_seconds()
                     conversation.duration_seconds = int(duration)
+                    
+                    # Update video call usage with actual duration
+                    update_video_call_usage(db, conversation.user_id, int(duration))
                 
                 db.commit()
                 
@@ -1338,6 +1349,25 @@ async def get_user_analytics(
     except Exception as e:
         print(f"User analytics error: {e}")
         raise HTTPException(status_code=500, detail=f"Failed to get user analytics: {str(e)}")
+
+@app.get("/api/video-call-usage")
+async def get_video_call_usage(
+    db: Session = Depends(get_db),
+    user_data: dict = Depends(verify_clerk_token)
+):
+    """Get current video call usage status for the authenticated user"""
+    try:
+        user_id = user_data.get("sub")
+        
+        usage_status = get_video_call_usage_status(db, user_id)
+        
+        return {
+            "usage": usage_status,
+            "can_start_call": usage_status["calls_remaining"] > 0 and usage_status["total_duration_remaining_seconds"] > 0
+        }
+    except Exception as e:
+        print(f"Video call usage error: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to get video call usage: {str(e)}")
 
 @app.get("/")
 async def root():

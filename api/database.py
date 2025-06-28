@@ -1,4 +1,4 @@
-from sqlalchemy import create_engine, Column, String, Text, DateTime, Boolean, Integer, ForeignKey
+from sqlalchemy import create_engine, Column, String, Text, DateTime, Boolean, Integer, ForeignKey, Date, UniqueConstraint
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker, relationship
 from datetime import datetime
@@ -173,6 +173,26 @@ class UsageAnalytics(Base):
     document_id = Column(String, nullable=True)
     additional_data = Column(Text, nullable=True)  # JSON string for additional data
 
+# Video Call Usage Model - tracks daily video call constraints
+class VideoCallUsage(Base):
+    __tablename__ = "video_call_usage"
+    
+    id = Column(Integer, primary_key=True, index=True, autoincrement=True)
+    user_id = Column(String, ForeignKey("user_profiles.id"), index=True)
+    date = Column(Date, index=True)  # Date only, for daily tracking
+    calls_used = Column(Integer, default=0)  # Number of calls used today
+    total_duration_seconds = Column(Integer, default=0)  # Total duration used today
+    max_calls_per_day = Column(Integer, default=2)  # Default: 2 calls per day
+    max_duration_per_call = Column(Integer, default=1200)  # Default: 20 minutes (1200 seconds)
+    max_total_duration_per_day = Column(Integer, default=2400)  # Default: 40 minutes total per day
+    
+    # Relationships
+    user = relationship("UserProfile")
+    
+    __table_args__ = (
+        UniqueConstraint('user_id', 'date', name='unique_user_date'),
+    )
+
 # Create tables
 def create_tables():
     Base.metadata.create_all(bind=engine)
@@ -231,3 +251,101 @@ def log_user_activity(db, user_id, action_type, document_id=None, additional_dat
     )
     db.add(activity)
     db.commit()
+
+# Helper function to check video call constraints
+def check_video_call_constraints(db, user_id):
+    """Check if user can start a new video call based on daily constraints"""
+    from datetime import date
+    
+    today = date.today()
+    
+    # Get or create usage record for today
+    usage = db.query(VideoCallUsage).filter(
+        VideoCallUsage.user_id == user_id,
+        VideoCallUsage.date == today
+    ).first()
+    
+    if not usage:
+        # Create new usage record for today
+        usage = VideoCallUsage(
+            user_id=user_id,
+            date=today,
+            calls_used=0,
+            total_duration_seconds=0
+        )
+        db.add(usage)
+        db.commit()
+    
+    # Check constraints
+    if usage.calls_used >= usage.max_calls_per_day:
+        return False, f"Daily limit reached. You can only make {usage.max_calls_per_day} video calls per day."
+    
+    if usage.total_duration_seconds >= usage.max_total_duration_per_day:
+        return False, f"Daily duration limit reached. You can only use {usage.max_total_duration_per_day // 60} minutes of video calls per day."
+    
+    return True, "Video call allowed"
+
+# Helper function to update video call usage
+def update_video_call_usage(db, user_id, duration_seconds=None):
+    """Update video call usage when a call starts or ends"""
+    from datetime import date
+    
+    today = date.today()
+    
+    # Get or create usage record for today
+    usage = db.query(VideoCallUsage).filter(
+        VideoCallUsage.user_id == user_id,
+        VideoCallUsage.date == today
+    ).first()
+    
+    if not usage:
+        usage = VideoCallUsage(
+            user_id=user_id,
+            date=today,
+            calls_used=0,
+            total_duration_seconds=0
+        )
+        db.add(usage)
+    
+    # Increment call count
+    usage.calls_used += 1
+    
+    # Add duration if provided
+    if duration_seconds:
+        usage.total_duration_seconds += duration_seconds
+    
+    db.commit()
+    return usage
+
+# Helper function to get video call usage status
+def get_video_call_usage_status(db, user_id):
+    """Get current video call usage status for the user"""
+    from datetime import date
+    
+    today = date.today()
+    
+    usage = db.query(VideoCallUsage).filter(
+        VideoCallUsage.user_id == user_id,
+        VideoCallUsage.date == today
+    ).first()
+    
+    if not usage:
+        return {
+            "calls_used": 0,
+            "calls_remaining": 2,
+            "total_duration_seconds": 0,
+            "total_duration_remaining_seconds": 2400,
+            "max_calls_per_day": 2,
+            "max_duration_per_call": 1200,
+            "max_total_duration_per_day": 2400
+        }
+    
+    return {
+        "calls_used": usage.calls_used,
+        "calls_remaining": max(0, usage.max_calls_per_day - usage.calls_used),
+        "total_duration_seconds": usage.total_duration_seconds,
+        "total_duration_remaining_seconds": max(0, usage.max_total_duration_per_day - usage.total_duration_seconds),
+        "max_calls_per_day": usage.max_calls_per_day,
+        "max_duration_per_call": usage.max_duration_per_call,
+        "max_total_duration_per_day": usage.max_total_duration_per_day
+    }
