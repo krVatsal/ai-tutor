@@ -1,16 +1,9 @@
 /** @type {import('next').NextConfig} */
 const nextConfig = {
-  transpilePackages: ['@alloc/quick-lru'],
-  webpack: (config) => {
-    config.resolve.fallback = {
-      ...config.resolve.fallback,
-      fs: false, // avoid fs crash in browser
-    };
-    return config;
-  },
+
   experimental: {
     serverActions: {
-      allowedOrigins: ['localhost:3000', '127.0.0.1:3000','https://mira-aitutor.netlify.app'],
+      allowedOrigins: ['localhost:3000', '127.0.0.1:3000','https://mira-aitutor.netlify.app', 'https://brave-rock-013225f00.2.azurestaticapps.net'],
     },
   },
   eslint: {

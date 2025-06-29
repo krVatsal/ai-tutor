@@ -1,0 +1,54 @@
+version: '3.8'
+
+services:
+  mira-api:
+    build: .
+    container_name: mira-ai-tutor-api
+    ports:
+      - "8000:8000"
+    environment:
+      - PYTHONPATH=/app
+      - CLERK_PEM_PUBLIC_KEY=${CLERK_PEM_PUBLIC_KEY}
+      - TAVUS_API_KEY=${TAVUS_API_KEY}
+      - TAVUS_REPLICA_ID=${TAVUS_REPLICA_ID}
+      - TAVUS_API_URL=${TAVUS_API_URL:-https://tavusapi.com/v2}
+      - GOOGLE_API_KEY=${GOOGLE_API_KEY}
+      - APP_URL=${APP_URL:-http://localhost:3000}
+    volumes:
+      # Mount uploads directory for persistent file storage
+      - ./uploads:/app/uploads
+      # Mount vector_db directory for persistent vector storage
+      - ./vector_db:/app/vector_db
+      # Mount database file for persistence
+      - ./mira_tutor.db:/app/mira_tutor.db
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+    networks:
+      - mira-network
+
+  # Optional: Add a database service if you want to use PostgreSQL instead of SQLite
+  # postgres:
+  #   image: postgres:15-alpine
+  #   container_name: mira-postgres
+  #   environment:
+  #     POSTGRES_DB: mira_tutor
+  #     POSTGRES_USER: mira_user
+  #     POSTGRES_PASSWORD: mira_password
+  #   volumes:
+  #     - postgres_data:/var/lib/postgresql/data
+  #   ports:
+  #     - "5432:5432"
+  #   networks:
+  #     - mira-network
+
+networks:
+  mira-network:
+    driver: bridge
+
+# volumes:
+#   postgres_data: 
