@@ -1,11 +1,6 @@
 /** @type {import('next').NextConfig} */
 const nextConfig = {
 
-  experimental: {
-    serverActions: {
-      allowedOrigins: ['localhost:3000', '127.0.0.1:3000','https://mira-aitutor.netlify.app', 'https://brave-rock-013225f00.2.azurestaticapps.net'],
-    },
-  },
   eslint: {
     ignoreDuringBuilds: true,
   },
