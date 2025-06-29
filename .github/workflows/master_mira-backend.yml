@@ -8,7 +8,7 @@ on:
 
 jobs:
   build:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-latest   # ✅ Fixed typo
     permissions:
       contents: read
 
@@ -20,25 +20,19 @@ jobs:
         with:
           python-version: '3.13'
 
-      - name: Create and start virtual environment
-        run: |
-          python -m venv venv
-          source venv/bin/activate
-
       - name: Install dependencies
         run: pip install -r api/requirements.txt
-        
-      # Optional: Run tests here
 
-      - name: Zip artifact for deployment (only api/)
-        run: zip -r release.zip api
+      - name: Zip only contents of api/
+        run: |
+          cd api
+          zip -r ../release.zip .
 
       - name: Upload artifact for deployment jobs
         uses: actions/upload-artifact@v4
         with:
           name: python-app
-          path: |
-            release.zip
+          path: release.zip
 
   deploy:
     runs-on: ubuntu-latest
@@ -63,10 +57,11 @@ jobs:
           tenant-id: ${{ secrets.AZUREAPPSERVICE_TENANTID_C6BAE1B8E65D4389A02F11AA3E115BBB }}
           subscription-id: ${{ secrets.AZUREAPPSERVICE_SUBSCRIPTIONID_858418EF476441AE867DEE2C03E79B2E }}
 
-      - name: Deploy to Azure Web App (from api/)
+      - name: Deploy to Azure Web App
         uses: azure/webapps-deploy@v3
         id: deploy-to-webapp
         with:
           app-name: 'mira-backend'
           slot-name: 'Production'
-          package: api
+          package: release.zip
+          type: runFromPackage  # ✅ Ensures smoother Python ZIP deploy
