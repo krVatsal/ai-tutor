@@ -9,38 +9,6 @@ const nextConfig = {
   experimental: {
     serverActions: true,
     staticPageGenerationTimeout: 120,
-    // Optimize bundle size
-    optimizePackageImports: ['@radix-ui/react-icons', 'lucide-react'],
-  },
-  
-  // Optimize webpack for smaller bundles
-  webpack: (config, { isServer }) => {
-    if (!isServer) {
-      // Don't bundle server-only modules on the client side
-      config.resolve.fallback = {
-        ...config.resolve.fallback,
-        fs: false,
-        net: false,
-        tls: false,
-      };
-    }
-    
-    // Optimize bundle size
-    config.optimization = {
-      ...config.optimization,
-      splitChunks: {
-        chunks: 'all',
-        cacheGroups: {
-          vendor: {
-            test: /[\\/]node_modules[\\/]/,
-            name: 'vendors',
-            chunks: 'all',
-          },
-        },
-      },
-    };
-    
-    return config;
   },
   
   async rewrites() {
