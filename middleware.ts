@@ -8,13 +8,26 @@ const isPublicRoute = createRouteMatcher([
 ]);
 
 export default clerkMiddleware(async (auth, request) => {
-  // Allow public routes to pass through
-  if (isPublicRoute(request)) {
+  try {
+    // Allow public routes to pass through
+    if (isPublicRoute(request)) {
+      return;
+    }
+
+    // For all other routes, require authentication
+    await auth.protect();
+  } catch (error) {
+    console.error('Clerk middleware error:', error);
+    
+    // If there's an authentication error, redirect to sign-in
+    if (error instanceof Error && error.message.includes('jwk-kid-mismatch')) {
+      const signInUrl = new URL('/sign-in', request.url);
+      return Response.redirect(signInUrl);
+    }
+    
+    // For other errors, allow the request to continue (will show error boundary)
     return;
   }
-
-  // For all other routes, require authentication
-  await auth.protect();
 });
 
 export const config = {

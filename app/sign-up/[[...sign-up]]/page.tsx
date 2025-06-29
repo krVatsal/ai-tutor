@@ -1,33 +1,36 @@
 import { SignUp } from '@clerk/nextjs';
+import { ClerkErrorBoundary } from '@/components/clerk-error-boundary';
 
 export default function SignUpPage() {
   return (
-    <div className="min-h-screen flex items-center justify-center bg-gradient-to-br from-primary/5 via-background to-secondary/5">
-      <div className="w-full max-w-md">
-        <div className="text-center mb-8">
-          <h1 className="text-3xl font-bold text-primary mb-2">Join Mira</h1>
-          <p className="text-muted-foreground">Create your account to start learning with AI</p>
+    <ClerkErrorBoundary>
+      <div className="min-h-screen flex items-center justify-center bg-gradient-to-br from-primary/5 via-background to-secondary/5">
+        <div className="w-full max-w-md">
+          <div className="text-center mb-8">
+            <h1 className="text-3xl font-bold text-primary mb-2">Join Mira</h1>
+            <p className="text-muted-foreground">Create your account to start learning with AI</p>
+          </div>
+          <SignUp 
+            appearance={{
+              elements: {
+                rootBox: "mx-auto",
+                card: "shadow-2xl border-0 bg-card",
+                headerTitle: "text-2xl font-bold text-foreground",
+                headerSubtitle: "text-muted-foreground",
+                socialButtonsBlockButton: "border-border hover:bg-accent",
+                formButtonPrimary: "bg-primary hover:bg-primary/90 text-primary-foreground",
+                footerActionLink: "text-primary hover:text-primary/80",
+                identityPreviewEditButton: "text-primary hover:text-primary/80",
+                formFieldInput: "border-border focus:border-primary",
+                dividerLine: "bg-border",
+                dividerText: "text-muted-foreground",
+              }
+            }}
+            redirectUrl="/"
+            signInUrl="/sign-in"
+          />
         </div>
-        <SignUp 
-          appearance={{
-            elements: {
-              rootBox: "mx-auto",
-              card: "shadow-2xl border-0 bg-card",
-              headerTitle: "text-2xl font-bold text-foreground",
-              headerSubtitle: "text-muted-foreground",
-              socialButtonsBlockButton: "border-border hover:bg-accent",
-              formButtonPrimary: "bg-primary hover:bg-primary/90 text-primary-foreground",
-              footerActionLink: "text-primary hover:text-primary/80",
-              identityPreviewEditButton: "text-primary hover:text-primary/80",
-              formFieldInput: "border-border focus:border-primary",
-              dividerLine: "bg-border",
-              dividerText: "text-muted-foreground",
-            }
-          }}
-          redirectUrl="/"
-          signInUrl="/sign-in"
-        />
       </div>
-    </div>
+    </ClerkErrorBoundary>
   );
 }
