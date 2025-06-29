@@ -9,6 +9,38 @@ const nextConfig = {
   experimental: {
     serverActions: true,
     staticPageGenerationTimeout: 120,
+    // Optimize bundle size
+    optimizePackageImports: ['@radix-ui/react-icons', 'lucide-react'],
+  },
+  
+  // Optimize webpack for smaller bundles
+  webpack: (config, { isServer }) => {
+    if (!isServer) {
+      // Don't bundle server-only modules on the client side
+      config.resolve.fallback = {
+        ...config.resolve.fallback,
+        fs: false,
+        net: false,
+        tls: false,
+      };
+    }
+    
+    // Optimize bundle size
+    config.optimization = {
+      ...config.optimization,
+      splitChunks: {
+        chunks: 'all',
+        cacheGroups: {
+          vendor: {
+            test: /[\\/]node_modules[\\/]/,
+            name: 'vendors',
+            chunks: 'all',
+          },
+        },
+      },
+    };
+    
+    return config;
   },
   
   async rewrites() {
@@ -29,14 +61,8 @@ const nextConfig = {
   // Exclude unnecessary files and folders from build
   outputFileTracingExcludes: {
     '*': [
-      // Exclude API folder (FastAPI backend)
+      // Exclude API folder (FastAPI backend) - this is the main culprit
       'api/**/*',
-      
-      // Exclude development and build artifacts
-      
-      'node_modules/@swc/core-linux-x64-gnu',
-      'node_modules/@swc/core-linux-x64-musl',
-      'node_modules/@esbuild/linux-x64',
       
       // Exclude test files
       '**/*.test.js',
