@@ -56,7 +56,9 @@ export function AvatarDisplay({
       const token = await getToken();
       if (!token) return;
 
-      const response = await fetch('https://mira-backend-fcdndhgegjdhghf2.centralindia-01.azurewebsites.net/api/video-call-usage', {
+      const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL || 'https://mira-backend-fcdndhgegjdhghf2.centralindia-01.azurewebsites.net';
+      
+      const response = await fetch(`${API_BASE_URL}/api/video-call-usage`, {
         headers: {
           'Authorization': `Bearer ${token}`,
         },
