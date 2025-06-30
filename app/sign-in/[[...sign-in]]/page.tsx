@@ -26,7 +26,7 @@ export default function SignInPage() {
                 dividerText: "text-muted-foreground",
               }
             }}
-            redirectUrl="/"
+            fallbackRedirectUrl="/"
             signUpUrl="/sign-up"
           />
         </div>

@@ -15,7 +15,7 @@ import { createConversationWithPersona } from "@/lib/tavus";
 import { useUser, useAuth } from '@clerk/nextjs';
 
 // API base URL configuration
-const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL || 'https://mira-backend-fcdndhgegjdhghf2.centralindia-01.azurewebsites.net';
+const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL;
 
 export function TutorApp() {
   const { isLoaded, isSignedIn, user } = useUser();

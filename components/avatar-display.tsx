@@ -11,6 +11,8 @@ import { cn } from "@/lib/utils";
 import { createConversationWithAuth } from "@/lib/tavus";
 import { useAuth } from '@clerk/nextjs';
 
+const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL;
+
 interface AvatarDisplayProps {
   isProcessing: boolean;
   lastMessage: string;
@@ -56,8 +58,6 @@ export function AvatarDisplay({
       const token = await getToken();
       if (!token) return;
 
-      const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL || 'https://mira-backend-fcdndhgegjdhghf2.centralindia-01.azurewebsites.net';
-      
       const response = await fetch(`${API_BASE_URL}/api/video-call-usage`, {
         headers: {
           'Authorization': `Bearer ${token}`,
