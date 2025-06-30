@@ -2,9 +2,7 @@
 
 import { useAuth } from '@clerk/nextjs';
 
-const API_BASE_URL = process.env.NODE_ENV === 'production' 
-  ? 'https://your-api-domain.com' 
-  : 'https://mira-backend-fcdndhgegjdhghf2.centralindia-01.azurewebsites.net';
+const API_BASE_URL ='https://mira-backend-fcdndhgegjdhghf2.centralindia-01.azurewebsites.net';
 
 // Helper function to get auth headers
 async function getAuthHeaders() {
