@@ -58,13 +58,13 @@ export function TutorApp() {
   }, [currentPersonaId, user]);
 
   // Show loading state while Clerk is loading
-  if (!isLoaded) {
-    return (
-      <div className="min-h-screen flex items-center justify-center">
-        <div className="animate-spin rounded-full h-32 w-32 border-b-2 border-primary"></div>
-      </div>
-    );
-  }
+  // if (!isLoaded) {
+  //   return (
+  //     <div className="min-h-screen flex items-center justify-center">
+  //       <div className="animate-spin rounded-full h-32 w-32 border-b-2 border-primary"></div>
+  //     </div>
+  //   );
+  // }
 
   // If user is not signed in, show loading (middleware will handle redirect)
   if (!isSignedIn) {
