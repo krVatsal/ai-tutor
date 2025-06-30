@@ -67,13 +67,13 @@ export function TutorApp() {
   // }
 
   // If user is not signed in, show loading (middleware will handle redirect)
-  if (!isSignedIn) {
-    return (
-      <div className="min-h-screen flex items-center justify-center">
-        <div className="animate-spin rounded-full h-32 w-32 border-b-2 border-primary"></div>
-      </div>
-    );
-  }
+  // if (!isSignedIn) {
+  //   return (
+  //     <div className="min-h-screen flex items-center justify-center">
+  //       <div className="animate-spin rounded-full h-32 w-32 border-b-2 border-primary"></div>
+  //     </div>
+  //   );
+  // }
 
   const loadAvailableDocuments = async () => {
     try {
@@ -354,7 +354,7 @@ I'm ready to help you understand the document through our text chat. What would 
       <div className="container mx-auto px-4 py-6 flex-1 flex flex-col">
         <div className="mb-4">
           <h2 className="text-2xl font-bold text-foreground">
-            Welcome back, {user.firstName || user.emailAddresses[0]?.emailAddress || 'there'}!
+            Welcome back, {user?.firstName || user?.emailAddresses[0]?.emailAddress || 'there'}!
           </h2>
           <p className="text-muted-foreground">Ready to continue learning with Mira?</p>
         </div>
