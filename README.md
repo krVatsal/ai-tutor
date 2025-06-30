@@ -34,7 +34,8 @@ An intelligent AI tutor application that helps students understand documents thr
 
 ### Prerequisites
 - Node.js 18+ 
-- Python 3.11+
+- Python 3.11+ (for local non-Docker development)
+- Docker & Docker Compose
 - Git
 
 ### Installation
@@ -50,28 +51,24 @@ An intelligent AI tutor application that helps students understand documents thr
    npm install
    ```
 
-3. **Set up Python backend**
-   ```bash
-   cd api
-   python -m venv venv
-   source venv/bin/activate  # On Windows: venv\Scripts\activate
-   pip install -r requirements.txt
-   ```
+3. **Set up Python backend using Docker**
+   
+   The backend is containerized using Docker, which simplifies setup. Make sure you have Docker running on your machine.
 
 4. **Environment Variables**
    
-   Create `.env` files in both root and `api` directories with required variables:
+   Create `.env` files in both the root directory and the `api` directory with the required variables:
    
-   **Root `.env`:**
+   **Root `/.env`:**
    ```env
    NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY=your_clerk_key
    CLERK_SECRET_KEY=your_clerk_secret
    NEXT_PUBLIC_API_URL=http://localhost:8000
    ```
    
-   **API `.env`:**
+   **API `/api/.env`:**
    ```env
-   CLERK_PEM_PUBLIC_KEY=your_clerk_pem_key
+   CLERK_PEM_PUBLIC_KEY="-----BEGIN PUBLIC KEY-----\nYOUR_CLERK_PEM_PUBLIC_KEY\n-----END PUBLIC KEY-----"
    GOOGLE_API_KEY=your_google_api_key
    TAVUS_API_KEY=your_tavus_api_key
    TAVUS_REPLICA_ID=your_tavus_replica_id
@@ -79,13 +76,13 @@ An intelligent AI tutor application that helps students understand documents thr
 
 5. **Run the application**
    
-   **Start the backend:**
+   **Start the backend (with Docker Compose):**
    ```bash
    cd api
-   uvicorn main:app --reload
+   docker-compose up --build
    ```
    
-   **Start the frontend:**
+   **Start the frontend (in a separate terminal):**
    ```bash
    npm run dev
    ```
