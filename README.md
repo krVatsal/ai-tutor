@@ -20,7 +20,7 @@ An intelligent AI tutor application that helps students understand documents thr
 - **TypeScript** - Type-safe development
 - **Tailwind CSS** - Utility-first CSS framework
 - **shadcn/ui** - Modern UI components
-- **Clerk** - Authentication and user management
+- **Google OAuth** - Authentication and user management
 
 ### Backend
 - **FastAPI** - High-performance Python web framework
@@ -61,18 +61,27 @@ An intelligent AI tutor application that helps students understand documents thr
    
    **Root `/.env`:**
    ```env
-   NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY=your_clerk_key
-   CLERK_SECRET_KEY=your_clerk_secret
+   NEXT_PUBLIC_GOOGLE_CLIENT_ID=your_google_client_id
    NEXT_PUBLIC_API_URL=http://localhost:8000
    ```
    
    **API `/api/.env`:**
    ```env
-   CLERK_PEM_PUBLIC_KEY="-----BEGIN PUBLIC KEY-----\nYOUR_CLERK_PEM_PUBLIC_KEY\n-----END PUBLIC KEY-----"
+   GOOGLE_CLIENT_ID=your_google_client_id
+   GOOGLE_CLIENT_SECRET=your_google_client_secret
+   JWT_SECRET_KEY=your_jwt_secret_key_change_in_production
    GOOGLE_API_KEY=your_google_api_key
    TAVUS_API_KEY=your_tavus_api_key
    TAVUS_REPLICA_ID=your_tavus_replica_id
    ```
+
+   **To set up Google OAuth:**
+   1. Go to [Google Cloud Console](https://console.cloud.google.com/)
+   2. Create a new project or select existing one
+   3. Enable Google+ API
+   4. Create OAuth 2.0 credentials
+   5. Add authorized origins: `http://localhost:3000` (and your production domain)
+   6. Copy the client ID and secret to your `.env` files
 
 5. **Run the application**
    
@@ -94,7 +103,7 @@ An intelligent AI tutor application that helps students understand documents thr
 
 ## Usage
 
-1. **Sign Up/Login**: Create an account or sign in using Clerk authentication
+1. **Sign Up/Login**: Create an account or sign in using Google OAuth authentication
 2. **Upload Document**: Upload a PDF file for AI processing
 3. **Chat**: Start a text conversation about your document
 4. **Video Chat**: Initiate a video conversation with AI tutor Mira

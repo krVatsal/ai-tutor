@@ -22,9 +22,12 @@ import jwt
 from database import (
     create_tables, get_db, Document, Persona, Conversation, 
     ChatMessage, VectorStore, UserProfile, SpeechGeneration,
-    UserSession, UsageAnalytics, VideoCallUsage, engine, create_or_update_user_profile,
+    UserSession, UsageAnalytics, VideoCallUsage, engine,
     log_user_activity, check_video_call_constraints, update_video_call_usage, get_video_call_usage_status
 )
+
+# Import Google OAuth authentication
+from auth import google_auth, verify_token, get_current_user, create_or_update_user_profile
 
 # Load environment variables
 load_dotenv()
@@ -39,45 +42,6 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
-
-# Clerk configuration
-CLERK_PEM_PUBLIC_KEY = os.getenv("CLERK_PEM_PUBLIC_KEY")
-CLERK_JWKS_URL = "https://api.clerk.com/v1/jwks"
-
-# JWT verification for Clerk
-def verify_clerk_token(authorization: str = Header(None)):
-    if not authorization:
-        raise HTTPException(status_code=401, detail="Authorization header missing")
-    
-    try:
-        # Extract token from "Bearer <token>"
-        token = authorization.split(" ")[1] if authorization.startswith("Bearer ") else authorization
-        print(f"DEBUG: Received token: {token[:20]}..." if token else "No token")
-        
-        # For development, decode without verification to see token structure
-        unverified_payload = jwt.decode(token, options={"verify_signature": False})
-        print(f"DEBUG: Token payload: {unverified_payload}")
-        
-        # Check if token is expired
-        exp = unverified_payload.get('exp')
-        if exp and datetime.fromtimestamp(exp) < datetime.utcnow():
-            raise HTTPException(status_code=401, detail="Token has expired")
-        
-        # For development, we'll accept any valid Clerk token structure
-        # In production, you should verify the signature properly
-        if 'sub' in unverified_payload and 'iss' in unverified_payload:
-            if 'clerk.accounts.dev' in unverified_payload['iss'] or 'clerk.com' in unverified_payload['iss']:
-                print(f"DEBUG: Token accepted for user: {unverified_payload.get('sub')}")
-                return unverified_payload
-        
-        raise HTTPException(status_code=401, detail="Invalid Clerk token")
-        
-    except jwt.DecodeError as e:
-        print(f"DEBUG: Token decode error: {str(e)}")
-        raise HTTPException(status_code=401, detail=f"Invalid token format: {str(e)}")
-    except Exception as e:
-        print(f"DEBUG: Token verification failed: {str(e)}")
-        raise HTTPException(status_code=401, detail=f"Token verification failed: {str(e)}")
 
 # Pydantic models for request bodies
 class ChatRequest(BaseModel):
@@ -102,6 +66,15 @@ class ConversationRequest(BaseModel):
 class SpeechRequest(BaseModel):
     conversation_id: str
     text: str
+
+# Google OAuth models
+class GoogleTokenRequest(BaseModel):
+    google_token: str
+
+class LoginResponse(BaseModel):
+    access_token: str
+    token_type: str
+    user: dict
 
 # Create directories for storing uploads and vector DB
 os.makedirs("uploads", exist_ok=True)
@@ -226,11 +199,11 @@ def extract_text_from_documents(documents_list):
 async def create_persona(
     ctx: DocContext,
     db: Session = Depends(get_db),
-    user_data: dict = Depends(verify_clerk_token)
+    current_user: UserProfile = Depends(get_current_user)
 ):
     """Create a Tavus persona with document context"""
     try:
-        user_id = user_data.get("sub")
+        user_id = current_user.id
         
         if not TAVUS_API_KEY:
             raise HTTPException(status_code=500, detail="Tavus API key not configured")
@@ -355,11 +328,11 @@ Always be helpful, patient, and encouraging in your responses. Keep your answers
 async def create_conversation(
     request: ConversationRequest,
     db: Session = Depends(get_db),
-    user_data: dict = Depends(verify_clerk_token)
+    current_user: UserProfile = Depends(get_current_user)
 ):
     """Create a Tavus conversation with persona"""
     try:
-        user_id = user_data.get("sub")
+        user_id = current_user.id
         
         if not TAVUS_API_KEY:
             raise HTTPException(status_code=500, detail="Tavus API key not configured")
@@ -663,27 +636,73 @@ startup_event()
 async def upload_document(
     file: UploadFile = File(...), 
     db: Session = Depends(get_db),
-    user_data: dict = Depends(verify_clerk_token)
+    current_user: UserProfile = Depends(get_current_user)
 ):
     """Upload and process PDF document with Tavus persona creation"""
+    document_id = None
+    file_path = None
+    
     try:
-        user_id = user_data.get("sub")  # Clerk user ID
+        user_id = current_user.id
         print(f"DEBUG: Starting upload for user: {user_id}, file: {file.filename}")
         
-        # Create or update user profile
-        user_profile = create_or_update_user_profile(db, user_data)
+        # Validate file exists and has content
+        if not file or not file.filename:
+            raise HTTPException(
+                status_code=400, 
+                detail={
+                    "error": "No file provided",
+                    "message": "Please select a file to upload",
+                    "code": "NO_FILE",
+                    "suggestion": "Select a PDF file using the file picker or drag and drop area"
+                }
+            )
         
         # Validate file type
-        if not file.filename or not file.filename.lower().endswith('.pdf'):
-            raise HTTPException(status_code=400, detail="Only PDF files are supported")
+        if not file.filename.lower().endswith('.pdf'):
+            raise HTTPException(
+                status_code=400, 
+                detail={
+                    "error": "Invalid file type",
+                    "message": f"Only PDF files are supported. You uploaded: {file.filename.split('.')[-1] if '.' in file.filename else 'unknown'}",
+                    "code": "INVALID_FILE_TYPE"
+                }
+            )
         
         # Validate file size (10MB limit)
-        file_size = 0
-        content = await file.read()
-        file_size = len(content)
+        try:
+            content = await file.read()
+            file_size = len(content)
+        except Exception as e:
+            raise HTTPException(
+                status_code=400,
+                detail={
+                    "error": "Failed to read file",
+                    "message": "There was an error reading your file. Please try again with a different file.",
+                    "code": "FILE_READ_ERROR"
+                }
+            )
+        
+        if file_size == 0:
+            raise HTTPException(
+                status_code=400,
+                detail={
+                    "error": "Empty file",
+                    "message": "The uploaded file appears to be empty. Please check your file and try again.",
+                    "code": "EMPTY_FILE"
+                }
+            )
         
         if file_size > 10 * 1024 * 1024:  # 10MB
-            raise HTTPException(status_code=400, detail="File size exceeds 10MB limit")
+            file_size_mb = round(file_size / (1024 * 1024), 2)
+            raise HTTPException(
+                status_code=400, 
+                detail={
+                    "error": "File too large",
+                    "message": f"File size ({file_size_mb}MB) exceeds the 10MB limit. Please use a smaller file.",
+                    "code": "FILE_TOO_LARGE"
+                }
+            )
         
         # Reset file pointer
         await file.seek(0)
@@ -726,39 +745,161 @@ async def upload_document(
         document_id = str(uuid.uuid4())
         file_path = f"uploads/{document_id}.pdf"
         
-        # Save file to disk
-        with open(file_path, "wb") as buffer:
-            shutil.copyfileobj(file.file, buffer)
+        # Save file to disk with error handling
+        try:
+            with open(file_path, "wb") as buffer:
+                shutil.copyfileobj(file.file, buffer)
+            print(f"File saved successfully to: {file_path}")
+        except OSError as e:
+            raise HTTPException(
+                status_code=500,
+                detail={
+                    "error": "File save failed",
+                    "message": "Failed to save the file to server. Please try again.",
+                    "code": "FILE_SAVE_ERROR"
+                }
+            )
+        except Exception as e:
+            print(f"Unexpected error saving file: {e}")
+            raise HTTPException(
+                status_code=500,
+                detail={
+                    "error": "File save failed",
+                    "message": "An unexpected error occurred while saving the file.",
+                    "code": "UNEXPECTED_SAVE_ERROR"
+                }
+            )
         
         # Save document to database with user_id
-        db_document = Document(
-            id=document_id,
-            user_id=user_id,  # Associate with user
-            filename=file.filename,
-            original_filename=file.filename,
-            file_path=file_path,
-            file_size=file_size,
-            content_type=file.content_type,
-            processing_status="processing",
-            processed=False
-        )
-        db.add(db_document)
-        db.commit()
+        try:
+            db_document = Document(
+                id=document_id,
+                user_id=user_id,
+                filename=file.filename,
+                original_filename=file.filename,
+                file_path=file_path,
+                file_size=file_size,
+                content_type=file.content_type,
+                processing_status="processing",
+                processed=False
+            )
+            db.add(db_document)
+            db.commit()
+            
+            # Log activity
+            log_user_activity(db, user_id, "document_uploaded", document_id)
+            print(f"Document record created in database: {document_id}")
+        except Exception as e:
+            print(f"Database error: {e}")
+            # Clean up the file if database operation failed
+            try:
+                if os.path.exists(file_path):
+                    os.remove(file_path)
+            except:
+                pass
+            raise HTTPException(
+                status_code=500,
+                detail={
+                    "error": "Database error",
+                    "message": "Failed to save document information to database. Please try again.",
+                    "code": "DATABASE_ERROR"
+                }
+            )
         
-        # Log activity
-        log_user_activity(db, user_id, "document_uploaded", document_id)
+        # Process document and create vector store with comprehensive error handling
+        try:
+            print(f"Starting document processing for: {file.filename}")
+            vector_store, doc_list, vector_db_path = process_document(file_path, document_id, user_id, db)
+            print(f"Document processing completed successfully")
+        except Exception as e:
+            print(f"Document processing error: {e}")
+            # Update document status to failed
+            try:
+                db_document.processing_status = "failed"
+                db_document.error_message = str(e)
+                db.commit()
+            except:
+                pass
+            
+            # Determine specific error type
+            error_message = str(e).lower()
+            if "pdf" in error_message or "corrupt" in error_message:
+                raise HTTPException(
+                    status_code=400,
+                    detail={
+                        "error": "PDF processing failed",
+                        "message": "The PDF file appears to be corrupted or invalid. Please try with a different PDF file.",
+                        "code": "INVALID_PDF"
+                    }
+                )
+            elif "memory" in error_message or "size" in error_message:
+                raise HTTPException(
+                    status_code=400,
+                    detail={
+                        "error": "Document too complex",
+                        "message": "The document is too large or complex to process. Please try with a simpler PDF file.",
+                        "code": "DOCUMENT_TOO_COMPLEX"
+                    }
+                )
+            else:
+                raise HTTPException(
+                    status_code=500,
+                    detail={
+                        "error": "Processing failed",
+                        "message": "Failed to process the document. Please try again or contact support if the issue persists.",
+                        "code": "PROCESSING_ERROR"
+                    }
+                )
         
-        # Process document and create vector store
-        vector_store, doc_list, vector_db_path = process_document(file_path, document_id, user_id, db)
-        
-        # Extract text content
-        document_text = extract_text_from_documents(doc_list)
+        # Extract text content with error handling
+        try:
+            document_text = extract_text_from_documents(doc_list)
+            if not document_text or len(document_text.strip()) < 50:
+                raise HTTPException(
+                    status_code=400,
+                    detail={
+                        "error": "No text content",
+                        "message": "Could not extract readable text from the PDF. Please ensure the PDF contains text (not just images).",
+                        "code": "NO_TEXT_CONTENT"
+                    }
+                )
+            print(f"Extracted {len(document_text)} characters of text")
+        except HTTPException:
+            raise
+        except Exception as e:
+            print(f"Text extraction error: {e}")
+            try:
+                db_document.processing_status = "failed"
+                db_document.error_message = f"Text extraction failed: {str(e)}"
+                db.commit()
+            except:
+                pass
+            raise HTTPException(
+                status_code=500,
+                detail={
+                    "error": "Text extraction failed",
+                    "message": "Failed to extract text from the PDF. Please try with a different file.",
+                    "code": "TEXT_EXTRACTION_ERROR"
+                }
+            )
         
         # Update document with text content and mark as processed
-        db_document.text_content = document_text
-        db_document.processed = True
-        db_document.processing_status = "completed"
-        db.commit()
+        try:
+            db_document.text_content = document_text
+            db_document.processed = True
+            db_document.processing_status = "completed"
+            db.commit()
+            print(f"Document marked as completed in database")
+        except Exception as e:
+            print(f"Database update error: {e}")
+            raise HTTPException(
+                status_code=500,
+                detail={
+                    "error": "Database update failed",
+                    "message": "Document was processed but failed to update database. Please try again.",
+                    "code": "DATABASE_UPDATE_ERROR"
+                }
+            )
         
         # Add to cache with user-specific key
         cache_key = f"{user_id}_{file.filename}"
@@ -775,63 +916,92 @@ async def upload_document(
         }
         vector_stores[file.filename] = vector_store
         
-        # Create Tavus persona with document context
+        # Create Tavus persona with document context (optional, non-blocking)
         persona_id = None
-        print(f"DEBUG: Starting persona creation section")
-        print(f"DEBUG: TAVUS_API_KEY value: {TAVUS_API_KEY}")
-        print(f"DEBUG: TAVUS_API_KEY type: {type(TAVUS_API_KEY)}")
-        print(f"DEBUG: TAVUS_API_KEY bool: {bool(TAVUS_API_KEY)}")
+        persona_error = None
+        print(f"Starting persona creation section")
         
         try:
-            if TAVUS_API_KEY:
+            if TAVUS_API_KEY and TAVUS_REPLICA_ID:
                 print(f"Creating Tavus persona for document: {file.filename}")
-                print(f"TAVUS_API_KEY exists: {bool(TAVUS_API_KEY)}")
-                print(f"TAVUS_REPLICA_ID: {TAVUS_REPLICA_ID}")
-                print(f"TAVUS_API_URL: {TAVUS_API_URL}")
-                
                 persona_response = await create_tavus_persona_with_document(document_text, file.filename, document_id, user_id, db)
                 persona_id = persona_response.get("persona_id")
                 print(f"Tavus persona created successfully: {persona_id}")
             else:
-                print("Tavus API key not configured - skipping persona creation")
-        except Exception as persona_error:
-            print(f"Persona creation failed: {persona_error}")
-            import traceback
-            traceback.print_exc()
+                print("Tavus API not fully configured - skipping persona creation")
+                persona_error = "Tavus API not configured"
+        except Exception as e:
+            print(f"Persona creation failed: {e}")
+            persona_error = str(e)
             # Continue without persona - document processing was successful
         
-        return {
+        # Prepare success response
+        response_data = {
             "success": True,
             "document_id": document_id,
             "filename": file.filename,
             "persona_id": persona_id,
             "file_size": file_size,
-            "message": "Document processed and vectorized successfully" + 
-                      (" with Tavus persona created" if persona_id else " (persona creation failed)")
+            "file_size_mb": round(file_size / (1024 * 1024), 2),
+            "text_length": len(document_text),
+            "message": "Document processed and vectorized successfully"
         }
+        
+        if persona_id:
+            response_data["message"] += " with AI tutor persona created"
+        elif persona_error:
+            response_data["persona_warning"] = f"Document processed successfully, but persona creation failed: {persona_error}"
+            response_data["message"] += " (video chat may not be available)"
+        
+        return response_data
     
-    except HTTPException:
-        raise
+    except HTTPException as http_error:
+        # Re-raise HTTP exceptions (these are expected errors with proper error details)
+        raise http_error
     except Exception as e:
-        print(f"Upload error: {e}")
-        # Update document status to failed if it exists
-        if 'document_id' in locals():
-            db_document = db.query(Document).filter(Document.id == document_id).first()
-            if db_document:
-                db_document.processing_status = "failed"
-                db_document.error_message = str(e)
-                db.commit()
-        raise HTTPException(status_code=500, detail=f"Failed to process document: {str(e)}")
+        print(f"Unexpected upload error: {e}")
+        import traceback
+        traceback.print_exc()
+        
+        # Clean up resources if something went wrong
+        try:
+            if 'document_id' in locals() and document_id:
+                # Update document status to failed if it exists
+                db_document = db.query(Document).filter(Document.id == document_id).first()
+                if db_document:
+                    db_document.processing_status = "failed"
+                    db_document.error_message = str(e)
+                    db.commit()
+                
+                # Clean up file if it was created
+                if 'file_path' in locals() and file_path and os.path.exists(file_path):
+                    try:
+                        os.remove(file_path)
+                        print(f"Cleaned up file: {file_path}")
+                    except:
+                        pass
+        except Exception as cleanup_error:
+            print(f"Error during cleanup: {cleanup_error}")
+        
+        # Return a generic error for unexpected issues
+        raise HTTPException(
+            status_code=500, 
+            detail={
+                "error": "Unexpected error",
+                "message": "An unexpected error occurred while processing your document. Please try again or contact support if the issue persists.",
+                "code": "UNEXPECTED_ERROR"
+            }
+        )
 
 @app.post("/api/generate-speech")
 async def generate_speech(
     request: SpeechRequest, 
     db: Session = Depends(get_db),
-    user_data: dict = Depends(verify_clerk_token)
+    current_user: UserProfile = Depends(get_current_user)
 ):
     """Generate speech/video from text"""
     try:
-        user_id = user_data.get("sub")
+        user_id = current_user.id
         
         if not TAVUS_API_KEY:
             raise HTTPException(status_code=500, detail="Tavus API key not configured")
@@ -891,7 +1061,7 @@ async def generate_speech(
 @app.get("/api/speech-status/{speech_id}")
 async def get_speech_status(
     speech_id: str,
-    user_data: dict = Depends(verify_clerk_token),
+    current_user: UserProfile = Depends(get_current_user),
     db: Session = Depends(get_db)
 ):
     """Get speech generation status"""
@@ -947,32 +1117,64 @@ async def get_speech_status(
 async def chat_with_document(
     request: ChatRequest, 
     db: Session = Depends(get_db),
-    user_data: dict = Depends(verify_clerk_token)
+    current_user: UserProfile = Depends(get_current_user)
 ):
     """Chat with AI about the document using vector search"""
     try:
-        user_id = user_data.get("sub")
+        user_id = current_user.id
         
-        # Create or update user profile
-        user_profile = create_or_update_user_profile(db, user_data)
-        
-        if not request.document_name:
-            raise HTTPException(status_code=400, detail="Document name is required")
-        
-        if not embeddings:
-            raise HTTPException(status_code=500, detail="Embeddings not available")
-            
-        if not llm:
-            raise HTTPException(status_code=500, detail="Language model not available")
-
-        print(f"Chat request for document: {request.document_name}, query: {request.query}")
-        
-        # Validate request data
+        # Validate request data first
         if not request.query or not request.query.strip():
-            raise HTTPException(status_code=400, detail="Query cannot be empty")
+            raise HTTPException(
+                status_code=400, 
+                detail={
+                    "error": "Empty query",
+                    "message": "Please enter a question or message",
+                    "code": "EMPTY_QUERY"
+                }
+            )
             
         if len(request.query) > 2000:
-            raise HTTPException(status_code=400, detail="Query too long (max 2000 characters)")
+            raise HTTPException(
+                status_code=400, 
+                detail={
+                    "error": "Query too long",
+                    "message": f"Your message is too long ({len(request.query)} characters). Please keep it under 2000 characters.",
+                    "code": "QUERY_TOO_LONG"
+                }
+            )
+        
+        if not request.document_name or not request.document_name.strip():
+            raise HTTPException(
+                status_code=400, 
+                detail={
+                    "error": "No document selected",
+                    "message": "Please upload and select a document first before chatting",
+                    "code": "NO_DOCUMENT"
+                }
+            )
+        
+        if not embeddings:
+            raise HTTPException(
+                status_code=500, 
+                detail={
+                    "error": "AI service unavailable",
+                    "message": "The AI embedding service is currently unavailable. Please try again later.",
+                    "code": "EMBEDDINGS_UNAVAILABLE"
+                }
+            )
+            
+        if not llm:
+            raise HTTPException(
+                status_code=500, 
+                detail={
+                    "error": "AI service unavailable",
+                    "message": "The AI language model is currently unavailable. Please try again later.",
+                    "code": "LLM_UNAVAILABLE"
+                }
+            )
+
+        print(f"Chat request for user {user_id}, document: {request.document_name}, query: {request.query[:100]}...")
         
         # Get document for this user
         document = db.query(Document).filter(
@@ -981,25 +1183,63 @@ async def chat_with_document(
         ).first()
         
         if not document:
-            raise HTTPException(status_code=400, detail="Document not found")
+            raise HTTPException(
+                status_code=400, 
+                detail={
+                    "error": "Document not found",
+                    "message": f"The document '{request.document_name}' was not found in your uploads. Please upload it first.",
+                    "code": "DOCUMENT_NOT_FOUND"
+                }
+            )
+        
+        if not document.processed or document.processing_status != "completed":
+            raise HTTPException(
+                status_code=400, 
+                detail={
+                    "error": "Document not ready",
+                    "message": f"The document '{request.document_name}' is still being processed. Please wait a moment and try again.",
+                    "code": "DOCUMENT_NOT_PROCESSED"
+                }
+            )
         
         # Save user message to database with user_id
-        user_message = ChatMessage(
-            user_id=user_id,
-            document_id=document.id,
-            role="user",
-            content=request.query,
-            message_type="text"
-        )
-        db.add(user_message)
+        try:
+            user_message = ChatMessage(
+                user_id=user_id,
+                document_id=document.id,
+                role="user",
+                content=request.query,
+                message_type="text"
+            )
+            db.add(user_message)
+        except Exception as e:
+            print(f"Error saving user message: {e}")
+            # Continue processing even if message save fails
         
         # Check if vector store is in cache
         cache_key = f"{user_id}_{request.document_name}"
         if cache_key not in vector_stores_cache:
             # Try to load from database for this user
             vector_store_record = db.query(VectorStore).filter(VectorStore.document_id == document.id).first()
-            if not vector_store_record or not os.path.exists(vector_store_record.vector_store_path):
-                raise HTTPException(status_code=400, detail="Vector store not found")
+            if not vector_store_record:
+                raise HTTPException(
+                    status_code=400, 
+                    detail={
+                        "error": "Document not vectorized",
+                        "message": f"The document '{request.document_name}' hasn't been properly processed for chat. Please re-upload the document.",
+                        "code": "NO_VECTOR_STORE"
+                    }
+                )
+            
+            if not os.path.exists(vector_store_record.vector_store_path):
+                raise HTTPException(
+                    status_code=500, 
+                    detail={
+                        "error": "Vector store missing",
+                        "message": "The document's search index is missing. Please re-upload the document.",
+                        "code": "VECTOR_STORE_MISSING"
+                    }
+                )
             
             # Load vector store
             try:
@@ -1011,18 +1251,38 @@ async def chat_with_document(
                 # Update last accessed
                 vector_store_record.last_accessed = datetime.utcnow()
                 db.commit()
+                print(f"Loaded vector store for {request.document_name}")
             except Exception as e:
-                raise HTTPException(status_code=500, detail=f"Failed to load vector store: {str(e)}")
+                print(f"Error loading vector store: {e}")
+                raise HTTPException(
+                    status_code=500, 
+                    detail={
+                        "error": "Failed to load document index",
+                        "message": "There was an error loading the document's search index. Please re-upload the document.",
+                        "code": "VECTOR_STORE_LOAD_ERROR"
+                    }
+                )
         
         # Get vector store for the document
         vector_store = vector_stores_cache[cache_key]
         
         # Create retrieval QA chain with LLM
-        qa_chain = RetrievalQA.from_chain_type(
-            llm=llm,
-            chain_type="stuff",
-            retriever=vector_store.as_retriever(search_kwargs={"k": 3})
-        )
+        try:
+            qa_chain = RetrievalQA.from_chain_type(
+                llm=llm,
+                chain_type="stuff",
+                retriever=vector_store.as_retriever(search_kwargs={"k": 3})
+            )
+        except Exception as e:
+            print(f"Error creating QA chain: {e}")
+            raise HTTPException(
+                status_code=500, 
+                detail={
+                    "error": "AI setup failed",
+                    "message": "Failed to set up the AI chat system. Please try again in a moment.",
+                    "code": "QA_CHAIN_ERROR"
+                }
+            )
         
         # Get AI response using the LLM
         start_time = datetime.utcnow()
@@ -1031,48 +1291,73 @@ async def chat_with_document(
             
             # Extract text from response
             response_text = ai_response.get('result', ai_response) if isinstance(ai_response, dict) else str(ai_response)
+            
+            if not response_text or response_text.strip() == "":
+                response_text = "I couldn't find relevant information to answer your question. Could you try rephrasing it or asking about a different aspect of the document?"
+                
         except Exception as e:
             print(f"LLM processing error: {e}")
             # Fallback to similarity search
-            relevant_docs = vector_store.similarity_search(request.query, k=3)
-            context = "\n\n".join([doc.page_content for doc in relevant_docs])
-            response_text = f"Based on the document content, here's what I found relevant to your question '{request.query}':\n\n{context[:500]}..."
+            try:
+                relevant_docs = vector_store.similarity_search(request.query, k=3)
+                if relevant_docs:
+                    context = "\n\n".join([doc.page_content for doc in relevant_docs])
+                    response_text = f"I found some relevant information about your question:\n\n{context[:500]}..."
+                else:
+                    response_text = "I couldn't find relevant information to answer your question. Could you try asking about a different aspect of the document?"
+            except Exception as fallback_error:
+                print(f"Fallback search error: {fallback_error}")
+                response_text = "I'm having trouble processing your question right now. Please try again in a moment."
         
         # Calculate response time
         response_time = (datetime.utcnow() - start_time).total_seconds() * 1000
         
         # Save assistant message to database with user_id
-        assistant_message = ChatMessage(
-            user_id=user_id,
-            document_id=document.id,
-            role="assistant",
-            content=response_text,
-            message_type="text",
-            response_time_ms=int(response_time)
-        )
-        db.add(assistant_message)
-        db.commit()
-        
-        # Log activity
-        log_user_activity(db, user_id, "chat_message_sent", document.id)
+        try:
+            assistant_message = ChatMessage(
+                user_id=user_id,
+                document_id=document.id,
+                role="assistant",
+                content=response_text,
+                message_type="text",
+                response_time_ms=int(response_time)
+            )
+            db.add(assistant_message)
+            db.commit()
+            
+            # Log activity
+            log_user_activity(db, user_id, "chat_message_sent", document.id)
+        except Exception as e:
+            print(f"Error saving assistant message: {e}")
+            # Continue and return response even if save fails
         
         return {"response": response_text}
     
-    except HTTPException:
-        raise
+    except HTTPException as http_error:
+        # Re-raise HTTP exceptions (these have proper error details)
+        raise http_error
     except Exception as e:
-        print(f"Chat error: {e}")
-        raise HTTPException(status_code=500, detail=f"Failed to process chat: {str(e)}")
+        print(f"Unexpected chat error: {e}")
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(
+            status_code=500, 
+            detail={
+                "error": "Unexpected error",
+                "message": "An unexpected error occurred while processing your message. Please try again.",
+                "code": "UNEXPECTED_CHAT_ERROR"
+            }
+        )
 
 @app.post("/api/summarize")
 async def summarize_document(
     request: SummarizeRequest, 
     db: Session = Depends(get_db),
-    user_data: dict = Depends(verify_clerk_token)
+    current_user: UserProfile = Depends(get_current_user)
 ):
     """Generate a summary of the document"""
     try:
-        user_id = user_data.get("sub")
+        user_id = current_user.id
         
         print(f"Summarize request for document: {request.document_name}")
         
@@ -1148,11 +1433,11 @@ async def summarize_document(
 async def get_chat_history(
     document_name: str, 
     db: Session = Depends(get_db),
-    user_data: dict = Depends(verify_clerk_token)
+    current_user: UserProfile = Depends(get_current_user)
 ):
     """Get chat history for a document"""
     try:
-        user_id = user_data.get("sub")
+        user_id = current_user.id
         
         # Get document for this user
         document = db.query(Document).filter(
@@ -1186,11 +1471,11 @@ async def get_chat_history(
 @app.get("/documents")
 async def get_documents(
     db: Session = Depends(get_db),
-    user_data: dict = Depends(verify_clerk_token)
+    current_user: UserProfile = Depends(get_current_user)
 ):
     """Get all uploaded documents for the authenticated user"""
     try:
-        user_id = user_data.get("sub")
+        user_id = current_user.id
         
         documents = db.query(Document).filter(
             Document.user_id == user_id
@@ -1217,11 +1502,11 @@ async def get_documents(
 @app.get("/api/documents")
 async def list_documents(
     db: Session = Depends(get_db),
-    user_data: dict = Depends(verify_clerk_token)
+    current_user: UserProfile = Depends(get_current_user)
 ):
     """List all available documents and their vector stores for the authenticated user"""
     try:
-        user_id = user_data.get("sub")
+        user_id = current_user.id
         
         # Get documents from database for this user
         documents_from_db = db.query(Document).filter(
@@ -1256,11 +1541,11 @@ async def list_documents(
 @app.get("/api/personas")
 async def get_personas(
     db: Session = Depends(get_db),
-    user_data: dict = Depends(verify_clerk_token)
+    current_user: UserProfile = Depends(get_current_user)
 ):
     """Get all created personas for the authenticated user"""
     try:
-        user_id = user_data.get("sub")
+        user_id = current_user.id
         
         # Get personas for documents owned by this user
         personas = db.query(Persona).join(Document).filter(
@@ -1288,14 +1573,13 @@ async def get_personas(
 @app.get("/api/user-profile")
 async def get_user_profile(
     db: Session = Depends(get_db),
-    user_data: dict = Depends(verify_clerk_token)
+    current_user: UserProfile = Depends(get_current_user)
 ):
     """Get user profile information"""
     try:
-        user_id = user_data.get("sub")
+        user_id = current_user.id
         
-        # Create or update user profile
-        user_profile = create_or_update_user_profile(db, user_data)
+        # User profile is already available as current_user
         
         # Get user statistics
         total_documents = db.query(Document).filter(Document.user_id == user_id).count()
@@ -1304,13 +1588,13 @@ async def get_user_profile(
         
         return {
             "user_profile": {
-                "id": user_profile.id,
-                "email": user_profile.email,
-                "first_name": user_profile.first_name,
-                "last_name": user_profile.last_name,
-                "profile_image_url": user_profile.profile_image_url,
-                "created_at": user_profile.created_at.isoformat(),
-                "last_login": user_profile.last_login.isoformat() if user_profile.last_login else None
+                "id": current_user.id,
+                "email": current_user.email,
+                "first_name": current_user.first_name,
+                "last_name": current_user.last_name,
+                "profile_image_url": current_user.profile_image_url,
+                "created_at": current_user.created_at.isoformat(),
+                "last_login": current_user.last_login.isoformat() if current_user.last_login else None
             },
             "statistics": {
                 "total_documents": total_documents,
@@ -1325,11 +1609,11 @@ async def get_user_profile(
 @app.get("/api/user-analytics")
 async def get_user_analytics(
     db: Session = Depends(get_db),
-    user_data: dict = Depends(verify_clerk_token)
+    current_user: UserProfile = Depends(get_current_user)
 ):
     """Get user activity analytics"""
     try:
-        user_id = user_data.get("sub")
+        user_id = current_user.id
         
         # Get recent activity
         recent_activity = db.query(UsageAnalytics).filter(
@@ -1353,11 +1637,11 @@ async def get_user_analytics(
 @app.get("/api/video-call-usage")
 async def get_video_call_usage(
     db: Session = Depends(get_db),
-    user_data: dict = Depends(verify_clerk_token)
+    current_user: UserProfile = Depends(get_current_user)
 ):
     """Get current video call usage status for the authenticated user"""
     try:
-        user_id = user_data.get("sub")
+        user_id = current_user.id
         
         usage_status = get_video_call_usage_status(db, user_id)
         
@@ -1371,7 +1655,7 @@ async def get_video_call_usage(
 
 @app.get("/")
 async def root():
-    return {"message": "Mira AI Tutor API is running with Tavus integration and Clerk authentication"}
+    return {"message": "Mira AI Tutor API is running with Tavus integration and Google OAuth authentication"}
 
 @app.get("/health")
 async def health_check():
@@ -1381,9 +1665,50 @@ async def health_check():
         "embeddings_available": embeddings is not None,
         "tavus_configured": TAVUS_API_KEY is not None,
         "database": "connected",
-        "auth": "clerk_enabled"
+        "auth": "google_oauth_enabled"
     }
 
+# Google OAuth Authentication Endpoints
+@app.post("/auth/google", response_model=LoginResponse)
+async def google_login(token_request: GoogleTokenRequest, db: Session = Depends(get_db)):
+    """Login with Google OAuth token"""
+    try:
+        # Verify Google token and get user info
+        user_info = google_auth.verify_google_token(token_request.google_token)
+        
+        # Create or update user profile
+        user_profile = create_or_update_user_profile(db, user_info)
+        
+        # Create JWT access token
+        access_token = google_auth.create_access_token(user_info)
+        
+        return LoginResponse(
+            access_token=access_token,
+            token_type="bearer",
+            user={
+                "id": user_profile.id,
+                "email": user_profile.email,
+                "first_name": user_profile.first_name,
+                "last_name": user_profile.last_name,
+                "profile_image_url": user_profile.profile_image_url
+            }
+        )
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"Authentication failed: {str(e)}")
+
+@app.get("/auth/me")
+async def get_current_user_info(current_user: UserProfile = Depends(get_current_user)):
+    """Get current authenticated user information"""
+    return {
+        "id": current_user.id,
+        "email": current_user.email,
+        "first_name": current_user.first_name,
+        "last_name": current_user.last_name,
+        "profile_image_url": current_user.profile_image_url,
+        "created_at": current_user.created_at,
+        "last_login": current_user.last_login
+    }
+    
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=8000)

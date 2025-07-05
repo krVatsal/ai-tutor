@@ -1,18 +1,12 @@
-// Frontend API calls to FastAPI backend with Clerk authentication
+// Frontend API calls to FastAPI backend with Google OAuth authentication
 
-import { useAuth } from '@clerk/nextjs';
+import { googleAuthService } from './google-auth';
 
-const API_BASE_URL ='https://mira-backend-fcdndhgegjdhghf2.centralindia-01.azurewebsites.net';
+const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000';
 
 // Helper function to get auth headers
 async function getAuthHeaders() {
-  // This will be called from components that have access to useAuth
-  // For now, we'll get the token from localStorage or context
-  const token = localStorage.getItem('clerk-token');
-  return {
-    'Content-Type': 'application/json',
-    'Authorization': token ? `Bearer ${token}` : '',
-  };
+  return await googleAuthService.getAuthHeaders();
 }
 
 // Create persona with document context

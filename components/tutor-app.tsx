@@ -12,7 +12,7 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Message } from "@/types/chat";
 import { cn } from "@/lib/utils";
 import { createConversationWithPersona } from "@/lib/tavus";
-import { useUser, useAuth } from '@clerk/nextjs';
+import { useUser, useAuth } from '@/components/auth-provider';
 
 // API base URL configuration
 const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL;
@@ -130,7 +130,7 @@ export function TutorApp() {
             setMessages([
               {
                 role: "assistant",
-                content: `Welcome back, ${user.firstName || 'there'}! I've restored your session with "${storedDocumentName}". Let's continue our discussion.`,
+                content: `Welcome back, ${user.first_name || 'there'}! I've restored your session with "${storedDocumentName}". Let's continue our discussion.`,
               },
               ...chatMessages
             ]);
@@ -163,11 +163,19 @@ export function TutorApp() {
         body: formData,
       });
 
+      const uploadData = await uploadResponse.json();
+
       if (!uploadResponse.ok) {
-        throw new Error("Failed to upload document");
+        // Handle structured error responses
+        if (uploadData.detail && typeof uploadData.detail === 'object') {
+          throw new Error(`${uploadData.detail.message || uploadData.detail.error || 'Upload failed'}`);
+        } else if (uploadData.detail) {
+          throw new Error(uploadData.detail);
+        } else {
+          throw new Error(`Upload failed with status ${uploadResponse.status}`);
+        }
       }
 
-      const uploadData = await uploadResponse.json();
       setActiveDocument(file.name);
       
       // Check if persona was created successfully
@@ -182,9 +190,9 @@ export function TutorApp() {
           ...prev,
           {
             role: "assistant",
-            content: `Perfect, ${user.firstName || 'there'}! I've processed "${file.name}" and created your personalized AI tutor experience. 
+            content: `Perfect, ${user.first_name || 'there'}! I've processed "${file.name}" and created your personalized AI tutor experience. 
 
-✅ Document processed and vectorized
+✅ Document processed and vectorized (${uploadData.file_size_mb}MB, ${uploadData.text_length} characters)
 ✅ AI persona "Mira" created with document context
 ✅ Video chat capability enabled
 
@@ -192,14 +200,19 @@ I'm now ready to discuss the document content through both text and video chat. 
           },
         ]);
       } else {
+        // Handle case where document was processed but persona creation failed
+        const warningMessage = uploadData.persona_warning 
+          ? `⚠️ ${uploadData.persona_warning}` 
+          : "⚠️ Video chat setup encountered an issue";
+        
         setMessages((prev) => [
           ...prev,
           {
             role: "assistant",
             content: `I've processed "${file.name}" successfully! 
 
-✅ Document processed and vectorized
-⚠️ Video chat setup encountered an issue
+✅ Document processed and vectorized (${uploadData.file_size_mb}MB, ${uploadData.text_length} characters)
+${warningMessage}
 
 I'm ready to help you understand the document through our text chat. What would you like to know about it?`,
           },
@@ -209,16 +222,12 @@ I'm ready to help you understand the document through our text chat. What would 
       // Refresh available documents list
       await loadAvailableDocuments();
       setTab("chat");
-    } catch (error) {
+    } catch (error: any) {
       console.error("Error uploading document:", error);
       
-      setMessages((prev) => [
-        ...prev,
-        {
-          role: "assistant",
-          content: "I'm sorry, there was an error processing your document. Please try again.",
-        },
-      ]);
+      // The error will be handled by the DocumentUpload component's error handling
+      // We'll just propagate it up so the toast can show the detailed error
+      throw error;
     } finally {
       setIsUploading(false);
     }
@@ -226,6 +235,19 @@ I'm ready to help you understand the document through our text chat. What would 
 
   const handleSendMessage = async (messageContent: string) => {
     if (!messageContent.trim() || !user) return;
+    
+    // Check if a document is active
+    if (!activeDocument) {
+      setMessages((prev) => [
+        ...prev,
+        { role: "user", content: messageContent },
+        {
+          role: "assistant",
+          content: "Please upload a document first before we can chat. You can upload a PDF using the Upload tab above.",
+        },
+      ]);
+      return;
+    }
     
     setMessages((prev) => [
       ...prev,
@@ -246,9 +268,36 @@ I'm ready to help you understand the document through our text chat. What would 
         }),
       });
 
+      const data = await response.json();
+
       if (!response.ok) {
-        throw new Error("Failed to get AI response");
-      }      const data = await response.json();
+        // Handle structured error responses from backend
+        let errorMessage = "Failed to get AI response";
+        
+        if (data.detail && typeof data.detail === 'object') {
+          errorMessage = data.detail.message || data.detail.error || errorMessage;
+          
+          // Add specific guidance based on error code
+          switch (data.detail.code) {
+            case "NO_DOCUMENT":
+              errorMessage += " Please upload a document first.";
+              break;
+            case "DOCUMENT_NOT_FOUND":
+              errorMessage += " You may need to re-upload the document.";
+              break;
+            case "DOCUMENT_NOT_PROCESSED":
+              errorMessage += " Please wait for processing to complete.";
+              break;
+            case "EMPTY_QUERY":
+              errorMessage = "Please enter a question or message.";
+              break;
+          }
+        } else if (data.detail) {
+          errorMessage = data.detail;
+        }
+        
+        throw new Error(errorMessage);
+      }
       
       // Handle case where response might be an object with result property
       const responseText = typeof data.response === 'object' && data.response?.result 
@@ -262,14 +311,30 @@ I'm ready to help you understand the document through our text chat. What would 
         { role: "assistant", content: responseText },
       ]);
       
-    } catch (error) {
+    } catch (error: any) {
       console.error("Error getting AI response:", error);
+      
+      // Determine appropriate error message for the user
+      let errorMessage = "I'm sorry, I'm having trouble understanding. Could you try asking again?";
+      
+      if (error.message) {
+        // Use the specific error message from the backend
+        if (error.message.includes("No document") || error.message.includes("upload")) {
+          errorMessage = error.message + " Please upload a document first using the Upload tab.";
+        } else if (error.message.includes("not found") || error.message.includes("re-upload")) {
+          errorMessage = error.message + " You can re-upload it using the Upload tab.";
+        } else if (error.message.includes("processing") || error.message.includes("wait")) {
+          errorMessage = error.message + " Processing usually takes a few moments.";
+        } else {
+          errorMessage = error.message;
+        }
+      }
       
       setMessages((prev) => [
         ...prev,
         {
           role: "assistant",
-          content: "I'm sorry, I'm having trouble understanding. Could you try asking again?",
+          content: errorMessage,
         },
       ]);
     } finally {
@@ -327,7 +392,7 @@ I'm ready to help you understand the document through our text chat. What would 
           setMessages([
             {
               role: "assistant",
-              content: `I've loaded "${document.filename}" and our previous conversation. How can I help you today, ${user.firstName || 'there'}?`,
+              content: `I've loaded "${document.filename}" and our previous conversation. How can I help you today, ${user.first_name || 'there'}?`,
             },
             ...chatMessages
           ]);
@@ -354,7 +419,7 @@ I'm ready to help you understand the document through our text chat. What would 
       <div className="container mx-auto px-4 py-6 flex-1 flex flex-col">
         <div className="mb-4">
           <h2 className="text-2xl font-bold text-foreground">
-            Welcome back, {user?.firstName || user?.emailAddresses[0]?.emailAddress || 'there'}!
+            Welcome back, {user?.first_name || user?.email || 'there'}!
           </h2>
           <p className="text-muted-foreground">Ready to continue learning with Mira?</p>
         </div>

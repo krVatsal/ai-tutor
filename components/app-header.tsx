@@ -1,6 +1,7 @@
 import { BookOpen } from "lucide-react";
 import { ThemeToggle } from "@/components/theme-toggle";
-import { UserButton, SignedIn, SignedOut, SignInButton } from '@clerk/nextjs';
+import { UserButton, SignedIn, SignedOut, SignInButton } from '@/components/user-button';
+import Link from 'next/link';
 
 export function AppHeader() {
   return (
@@ -14,23 +15,12 @@ export function AppHeader() {
         <div className="ml-auto flex items-center gap-4">
           <ThemeToggle />
           <SignedOut>
-            <SignInButton mode="modal">
-              <button className="text-sm font-medium text-primary hover:text-primary/80 transition-colors">
-                Sign In
-              </button>
-            </SignInButton>
+            <Link href="/sign-in">
+              <SignInButton />
+            </Link>
           </SignedOut>
           <SignedIn>
-            <UserButton 
-              appearance={{
-                elements: {
-                  avatarBox: "w-8 h-8",
-                  userButtonPopoverCard: "bg-card border-border",
-                  userButtonPopoverActionButton: "hover:bg-accent",
-                }
-              }}
-              afterSignOutUrl="/sign-up"
-            />
+            <UserButton />
           </SignedIn>
         </div>
       </div>

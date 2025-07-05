@@ -1,16 +1,11 @@
-import { clerkMiddleware, createRouteMatcher } from '@clerk/nextjs/server'
+import { NextResponse } from 'next/server';
+import type { NextRequest } from 'next/server';
 
-const isPublicRoute = createRouteMatcher([
-  '/sign-in(.*)',
-  '/sign-up(.*)',
-  '/api/webhooks(.*)',
-])
-
-export default clerkMiddleware((auth, req) => {
-  if (!isPublicRoute(req)) {
-    auth.protect()
-  }
-})
+export function middleware(request: NextRequest) {
+  // For now, we'll handle auth redirects client-side
+  // This can be enhanced later with server-side token validation
+  return NextResponse.next();
+}
 
 export const config = {
   matcher: [

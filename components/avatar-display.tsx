@@ -9,7 +9,7 @@ import { Badge } from "@/components/ui/badge";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { cn } from "@/lib/utils";
 import { createConversationWithAuth } from "@/lib/tavus";
-import { useAuth } from '@clerk/nextjs';
+import { useAuth } from '@/components/auth-provider';
 
 const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL;
 

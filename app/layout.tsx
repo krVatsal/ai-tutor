@@ -3,8 +3,7 @@ import type { Metadata } from 'next';
 import { Inter } from 'next/font/google';
 import { ThemeProvider } from '@/components/theme-provider';
 import { Toaster } from '@/components/ui/toaster';
-import { ClerkProvider } from '@clerk/nextjs';
-import { ClerkErrorBoundary } from '@/components/clerk-error-boundary';
+import { AuthProvider } from '@/components/auth-provider';
 
 const inter = Inter({ subsets: ['latin'] });
 
@@ -19,30 +18,20 @@ export default function RootLayout({
   children: React.ReactNode;
 }) {
   return (
-    <ClerkErrorBoundary>
-      <ClerkProvider 
-        publishableKey={process.env.NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY}
-        appearance={{
-          elements: {
-            rootBox: "mx-auto",
-            card: "shadow-2xl border-0 bg-card",
-          }
-        }}
-      > 
-        <html lang="en" suppressHydrationWarning>
-          <body className={inter.className}>
-            <ThemeProvider
-              attribute="class"
-              defaultTheme="system"
-              enableSystem
-              disableTransitionOnChange
-            >
-              {children}
-              <Toaster />
-            </ThemeProvider>
-          </body>
-        </html>
-      </ClerkProvider>
-    </ClerkErrorBoundary>
+    <html lang="en" suppressHydrationWarning>
+      <body className={inter.className}>
+        <AuthProvider>
+          <ThemeProvider
+            attribute="class"
+            defaultTheme="system"
+            enableSystem
+            disableTransitionOnChange
+          >
+            {children}
+            <Toaster />
+          </ThemeProvider>
+        </AuthProvider>
+      </body>
+    </html>
   );
 }
