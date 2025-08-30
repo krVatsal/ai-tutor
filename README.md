@@ -1,7 +1,5 @@
 # Mira - AI Tutor
 
-[![Built at Bolt](https://img.shields.io/badge/Built%20at-Bolt-blue?style=for-the-badge&logo=lightning)](https://bolt.new)
-
 An intelligent AI tutor application that helps students understand documents through interactive chat and video conversations.
 
 ## Features
@@ -140,7 +138,7 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 
 ## Acknowledgments
 
-- Built with ❤️ using [Bolt](https://bolt.new)
+- Built with ❤️ 
 - Powered by Google Generative AI
 - Video avatars by Tavus
 - UI components by shadcn/ui
